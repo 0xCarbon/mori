@@ -77,6 +77,7 @@ type Memberlist struct {
 	shutdownWG     sync.WaitGroup // Joins background goroutines on Shutdown
 	trackedMu      sync.Mutex
 	trackedGoids   map[uint64]struct{} // goids of shutdownWG-joined goroutines
+	callbackGoids  map[uint64]int      // goid -> delegate-callback nesting depth
 	leave          atomic.Int32        // Used as an atomic boolean value
 	leaveBroadcast chan struct{}
 
@@ -247,6 +248,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		config:               conf,
 		shutdownCh:           make(chan struct{}),
 		trackedGoids:         make(map[uint64]struct{}),
+		callbackGoids:        make(map[uint64]int),
 		leaveBroadcast:       make(chan struct{}, 1),
 		leaveSem:             make(chan struct{}, 1),
 		transport:            nodeAwareTransport,
@@ -547,7 +549,9 @@ func (m *Memberlist) delegateMeta() ([]byte, error) {
 	if m.config.Delegate == nil {
 		return nil, nil
 	}
+	exit := m.enterCallback()
 	meta := m.config.Delegate.NodeMeta(MetaMaxSize)
+	exit()
 	if len(meta) > MetaMaxSize {
 		return nil, fmt.Errorf("%w: %d bytes > %d-byte limit", ErrMetaTooLarge, len(meta), MetaMaxSize)
 	}
@@ -963,14 +967,35 @@ func (m *Memberlist) goBackground(fn func()) {
 	})
 }
 
-// onTrackedGoroutine reports whether the caller runs on a goroutine that
-// Shutdown joins.
-func (m *Memberlist) onTrackedGoroutine() bool {
+// enterCallback marks the current goroutine as running a delegate callback
+// and returns the corresponding exit function. Every delegate invocation
+// site wraps the call with this pair so a re-entrant Shutdown from user
+// code — which may hold nodeLock or run on a joined goroutine — can be
+// detected.
+func (m *Memberlist) enterCallback() (exit func()) {
 	id := goid()
 	m.trackedMu.Lock()
-	_, ok := m.trackedGoids[id]
+	m.callbackGoids[id]++
 	m.trackedMu.Unlock()
-	return ok
+	return func() {
+		m.trackedMu.Lock()
+		if m.callbackGoids[id]--; m.callbackGoids[id] <= 0 {
+			delete(m.callbackGoids, id)
+		}
+		m.trackedMu.Unlock()
+	}
+}
+
+// inReentrantContext reports whether the caller runs on a goroutine that
+// Shutdown joins, or inside a delegate callback (which may hold nodeLock).
+// In either case Shutdown must not join synchronously.
+func (m *Memberlist) inReentrantContext() bool {
+	id := goid()
+	m.trackedMu.Lock()
+	_, tracked := m.trackedGoids[id]
+	depth := m.callbackGoids[id]
+	m.trackedMu.Unlock()
+	return tracked || depth > 0
 }
 
 // Shutdown will stop any background maintenance of network activity
@@ -996,37 +1021,46 @@ func (m *Memberlist) onTrackedGoroutine() bool {
 // deadline plus the sendLocalState deadline reset). A delegate callback
 // that violates the non-blocking contract can delay it indefinitely.
 //
-// Exception: when Shutdown is called synchronously from a delegate
-// callback (which runs on one of the joined goroutines), it cannot wait
-// for itself. In that case the teardown still completes, but the join and
-// timer cleanup finish asynchronously and Shutdown returns immediately.
+// Exception: when Shutdown is called re-entrantly — from a delegate
+// callback (which may hold internal locks and may run on a joined
+// goroutine) — it cannot wait for the quiescence it is part of. In that
+// case the teardown still completes, but the join and timer cleanup finish
+// asynchronously and Shutdown returns immediately.
 //
-// This method is safe to call multiple times.
+// This method is safe to call multiple times and from delegate callbacks.
 func (m *Memberlist) Shutdown() error {
+	// Phase 1 — teardown, exactly once. shutdownLock is never held across
+	// the join below: a delegate callback on a joined goroutine calling
+	// Shutdown would block on it, and the join would wait for that
+	// goroutine — a cycle.
 	m.shutdownLock.Lock()
-	defer m.shutdownLock.Unlock()
+	didTeardown := false
+	if !m.hasShutdown() {
+		didTeardown = true
 
-	if m.hasShutdown() {
-		return nil
+		// Shut down the transport first, which should block until it's
+		// completely torn down. If we kill the memberlist-side handlers
+		// those I/O handlers might get stuck.
+		if err := m.transport.Shutdown(); err != nil {
+			m.logger.Printf("[ERR] Failed to shutdown transport: %v", err)
+		}
+
+		// Now tear down everything else.
+		m.shutdown.Store(1)
+		close(m.shutdownCh)
+		m.deschedule()
 	}
+	m.shutdownLock.Unlock()
 
-	// Shut down the transport first, which should block until it's
-	// completely torn down. If we kill the memberlist-side handlers
-	// those I/O handlers might get stuck.
-	if err := m.transport.Shutdown(); err != nil {
-		m.logger.Printf("[ERR] Failed to shutdown transport: %v", err)
-	}
-
-	// Now tear down everything else.
-	m.shutdown.Store(1)
-	close(m.shutdownCh)
-	m.deschedule()
-
-	if m.onTrackedGoroutine() {
-		// Re-entrant call from a joined goroutine (delegate callback):
-		// waiting here would deadlock on ourselves. Hand the join to an
-		// untracked reaper and return.
-		go m.finishShutdown()
+	// Phase 2 — quiescence.
+	if m.inReentrantContext() {
+		// Waiting here would deadlock: the caller either runs on a
+		// goroutine the join waits for, or holds nodeLock inside a
+		// delegate callback. Hand the join to an untracked reaper (only
+		// the call that performed the teardown spawns one).
+		if didTeardown {
+			go m.finishShutdown()
+		}
 		return nil
 	}
 	m.finishShutdown()

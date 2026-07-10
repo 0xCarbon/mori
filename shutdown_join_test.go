@@ -1,6 +1,7 @@
 package mori
 
 import (
+	"context"
 	"errors"
 	"net"
 	"sync"
@@ -230,6 +231,117 @@ func TestShutdown_FromDelegateCallback_NoSelfJoinDeadlock(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	require.True(t, m1.hasShutdown())
+}
+
+// shutdownOnLeaveDelegate calls Shutdown from NotifyLeave — which runs on
+// the *user* goroutine (via Leave) while holding nodeLock.
+type shutdownOnLeaveDelegate struct {
+	m    *Memberlist
+	once sync.Once
+	done chan error
+}
+
+func (d *shutdownOnLeaveDelegate) NotifyJoin(*Node)   {}
+func (d *shutdownOnLeaveDelegate) NotifyUpdate(*Node) {}
+func (d *shutdownOnLeaveDelegate) NotifyLeave(*Node) {
+	d.once.Do(func() { d.done <- d.m.Shutdown() })
+}
+
+// TestShutdown_FromUntrackedCallbackHoldingNodeLock: Shutdown called from a
+// delegate callback on the application goroutine (Leave → NotifyLeave, with
+// nodeLock held) must not deadlock — the join cannot run synchronously in a
+// context that holds nodeLock.
+func TestShutdown_FromUntrackedCallbackHoldingNodeLock(t *testing.T) {
+	d := &shutdownOnLeaveDelegate{done: make(chan error, 1)}
+
+	m := GetMemberlist(t, func(c *Config) { c.Events = d })
+	require.NoError(t, m.setAlive())
+	d.m = m
+	defer func() { _ = m.Shutdown() }()
+
+	leaveDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		leaveDone <- m.LeaveContext(ctx)
+	}()
+
+	select {
+	case err := <-d.done:
+		require.NoError(t, err, "Shutdown from NotifyLeave must not fail")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown from an untracked callback holding nodeLock deadlocked")
+	}
+
+	select {
+	case <-leaveDone:
+		// Leave may fail with ErrShutdown-wrapped errors; only the return matters.
+	case <-time.After(5 * time.Second):
+		t.Fatal("Leave never returned after in-callback Shutdown")
+	}
+}
+
+// TestShutdown_ConcurrentFromTrackedGoroutine: a tracked goroutine calling
+// Shutdown while a normal Shutdown is mid-join must not deadlock on
+// shutdownLock (the outer join waits for the tracked goroutine, which used
+// to wait for the outer caller's shutdownLock).
+func TestShutdown_ConcurrentFromTrackedGoroutine(t *testing.T) {
+	bt := newBlockingTransport()
+
+	c := testConfig(t)
+	c.Transport = bt
+	c.GossipInterval = time.Millisecond
+	c.GossipNodes = 1
+	c.ProbeInterval = 0
+	c.PushPullInterval = 0
+
+	m, err := Create(c)
+	require.NoError(t, err)
+
+	peer := alive{
+		Incarnation: 1,
+		Node:        "peer",
+		Addr:        []byte{127, 0, 0, 2},
+		Port:        7946,
+		Vsn:         m.config.BuildVsnArray(),
+	}
+	m.aliveNode(&peer, false)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for bt.inFlight.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	require.Positive(t, bt.inFlight.Load())
+
+	// Outer Shutdown will block joining the gossip goroutine stuck in the
+	// hung WriteTo until release fires.
+	outer := make(chan error, 1)
+	go func() { outer <- m.Shutdown() }()
+	time.Sleep(100 * time.Millisecond)
+
+	// A tracked goroutine now calls Shutdown: it must return promptly
+	// instead of blocking on shutdownLock (which the outer join would then
+	// wait on, forever).
+	inner := make(chan error, 1)
+	m.goBackground(func() { inner <- m.Shutdown() })
+
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		close(bt.release)
+	}()
+
+	select {
+	case err := <-inner:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("tracked-goroutine Shutdown deadlocked against the outer join")
+	}
+	select {
+	case err := <-outer:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("outer Shutdown never completed")
+	}
 }
 
 // TestSuspectNode_AfterShutdown_DoesNotArmTimer: suspect messages delivered

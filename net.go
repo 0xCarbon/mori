@@ -572,7 +572,9 @@ func (m *Memberlist) handlePing(buf []byte, from net.Addr) {
 	var ack ackResp
 	ack.SeqNo = p.SeqNo
 	if m.config.Ping != nil {
+		exit := m.enterCallback()
 		ack.Payload = m.config.Ping.AckPayload()
+		exit()
 	}
 
 	addr := ""
@@ -764,7 +766,9 @@ func (m *Memberlist) handleDead(buf []byte, from net.Addr) {
 func (m *Memberlist) handleUser(buf []byte, _ net.Addr) {
 	d := m.config.Delegate
 	if d != nil {
+		exit := m.enterCallback()
 		d.NotifyMsg(buf)
+		exit()
 	}
 }
 
@@ -1049,7 +1053,9 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 	// Get the delegate state
 	var userData []byte
 	if m.config.Delegate != nil {
+		exit := m.enterCallback()
 		userData = m.config.Delegate.LocalState(join)
+		exit()
 	}
 
 	// Create a bytes buffer writer
@@ -1302,7 +1308,10 @@ func (m *Memberlist) mergeRemoteState(join bool, remoteNodes []pushNodeState, us
 				DCur:  n.Vsn[5],
 			}
 		}
-		if err := m.config.Merge.NotifyMerge(nodes); err != nil {
+		exit := m.enterCallback()
+		err := m.config.Merge.NotifyMerge(nodes)
+		exit()
+		if err != nil {
 			return err
 		}
 	}
@@ -1312,7 +1321,9 @@ func (m *Memberlist) mergeRemoteState(join bool, remoteNodes []pushNodeState, us
 
 	// Invoke the delegate for user state
 	if userBuf != nil && m.config.Delegate != nil {
+		exit := m.enterCallback()
 		m.config.Delegate.MergeRemoteState(userBuf, join)
+		exit()
 	}
 	return nil
 }
@@ -1341,7 +1352,9 @@ func (m *Memberlist) readUserMsg(bufConn io.Reader, dec *codec.Decoder) error {
 
 		d := m.config.Delegate
 		if d != nil {
+			exit := m.enterCallback()
 			d.NotifyMsg(userBuf)
+			exit()
 		}
 	}
 
