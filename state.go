@@ -462,7 +462,7 @@ HANDLE_REMOTE_FAILURE:
 	disableTcpPings := m.config.DisableTcpPings ||
 		(m.config.DisableTcpPingsForNode != nil && m.config.DisableTcpPingsForNode(node.Name))
 	if (!disableTcpPings) && (node.PMax >= 3) {
-		go func() {
+		m.shutdownWG.Go(func() {
 			defer close(fallbackCh)
 			didContact, err := m.sendPingAndWaitForAck(node.FullAddress(), ping, deadline)
 			if err != nil {
@@ -474,7 +474,7 @@ HANDLE_REMOTE_FAILURE:
 			} else {
 				fallbackCh <- didContact
 			}
-		}()
+		})
 	} else {
 		close(fallbackCh)
 	}
@@ -1165,6 +1165,13 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 func (m *Memberlist) suspectNode(s *suspect) {
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
+
+	// Never arm a suspicion timer on a shut-down instance: in-flight
+	// stream handlers can still deliver suspect messages while Shutdown
+	// joins them, and their timers would outlive the join.
+	if m.hasShutdown() {
+		return
+	}
 	state, ok := m.nodeMap[s.Node]
 
 	// If we've never heard about this node before, ignore it
@@ -1230,6 +1237,13 @@ func (m *Memberlist) suspectNode(s *suspect) {
 	max := time.Duration(m.config.SuspicionMaxTimeoutMult) * min
 	fn := func(numConfirmations int) {
 		var d *dead
+
+		// The expiry callback runs on an untracked timer goroutine that
+		// can slip past Shutdown's best-effort timer.Stop: never mutate
+		// state or deliver events on a shut-down instance.
+		if m.hasShutdown() {
+			return
+		}
 
 		m.nodeLock.Lock()
 		state, ok := m.nodeMap[s.Node]

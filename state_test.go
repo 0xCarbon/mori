@@ -144,7 +144,9 @@ func TestMemberList_ProbeNode_Suspect(t *testing.T) {
 	a4 := alive{Node: addr4.String(), Addr: ip4, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a4, false)
 
+	m1.nodeLock.RLock()
 	n := m1.nodeMap[addr4.String()]
+	m1.nodeLock.RUnlock()
 	m1.probeNode(n)
 
 	// Should be marked suspect. Read under the lock: the suspicion timer

@@ -941,13 +941,22 @@ func (m *Memberlist) ProtocolVersion() uint8 {
 // to detect this node's shutdown using probing. If you wish to more
 // gracefully exit the cluster, call Leave prior to shutting down.
 //
-// Shutdown returns only after every background goroutine of this instance
-// (listeners, packet handler, schedule callbacks such as probe/gossip/
-// push-pull, and in-flight stream handlers) has finished: once it returns,
-// no goroutine of this instance touches the node state or the transport.
+// Shutdown returns only after every joined background goroutine of this
+// instance (listeners, packet handler, schedule callbacks such as probe/
+// gossip/push-pull, in-flight stream handlers, and TCP ping fallbacks) has
+// finished, and all pending suspicion timers have been stopped and cleared:
+// once it returns, no goroutine of this instance mutates node state,
+// delivers delegate events, or touches the transport. Two bounded
+// exceptions stay untracked: a suspicion timer callback that already fired
+// past the best-effort stop runs to completion but is a guarded no-op
+// (hasShutdown), and an abandoned ctx lock waiter may stay parked until the
+// current nodeLock holder releases.
+//
 // The join is unconditional; it terminates promptly because all callback
-// waits are bounded (ack timeouts, connection deadlines) — but a delegate
-// callback that violates the non-blocking contract can delay it.
+// waits are bounded (ack timeouts, connection deadlines). Worst case is
+// about 2×TCPTimeout when a stream peer stalls mid push/pull (accept
+// deadline plus the sendLocalState deadline reset). A delegate callback
+// that violates the non-blocking contract can delay it indefinitely.
 //
 // This method is safe to call multiple times.
 func (m *Memberlist) Shutdown() error {
@@ -970,20 +979,21 @@ func (m *Memberlist) Shutdown() error {
 	close(m.shutdownCh)
 	m.deschedule()
 
-	// Stop pending suspicion timers: their expiry callbacks mutate node
-	// state and deliver events, which must not happen after Shutdown.
-	// Stop is best-effort — a callback already fired is joined below via
-	// its deadNode broadcast being a no-op on a shut-down instance.
+	// Join every background goroutine. Never wait while holding nodeLock:
+	// the callbacks being joined acquire it.
+	m.shutdownWG.Wait()
+
+	// Stop pending suspicion timers — after the join, so timers armed by
+	// in-flight handlers (suspectNode also guards against arming past this
+	// point) cannot resurrect entries. Expiry callbacks mutate node state
+	// and deliver events, which must not happen after Shutdown; a callback
+	// that already slipped past Stop is a no-op via its hasShutdown guard.
 	m.nodeLock.Lock()
 	for node, timer := range m.nodeTimers {
 		timer.timer.Stop()
 		delete(m.nodeTimers, node)
 	}
 	m.nodeLock.Unlock()
-
-	// Join every background goroutine. Never wait while holding nodeLock:
-	// the callbacks being joined acquire it.
-	m.shutdownWG.Wait()
 	return nil
 }
 

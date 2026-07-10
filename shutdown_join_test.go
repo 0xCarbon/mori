@@ -141,6 +141,33 @@ func TestCreateJoinShutdown_NoGoroutineLeak(t *testing.T) {
 	require.NoError(t, m1.Shutdown())
 }
 
+// TestSuspectNode_AfterShutdown_DoesNotArmTimer: suspect messages delivered
+// by in-flight handlers while Shutdown joins them must not arm suspicion
+// timers that would outlive the instance.
+func TestSuspectNode_AfterShutdown_DoesNotArmTimer(t *testing.T) {
+	m := GetMemberlist(t, nil)
+	require.NoError(t, m.setAlive())
+
+	peer := alive{
+		Incarnation: 1,
+		Node:        "peer",
+		Addr:        []byte{127, 0, 0, 2},
+		Port:        7946,
+		Vsn:         m.config.BuildVsnArray(),
+	}
+	m.aliveNode(&peer, false)
+
+	require.NoError(t, m.Shutdown())
+
+	s := suspect{Incarnation: 1, Node: "peer", From: m.config.Name}
+	m.suspectNode(&s)
+
+	m.nodeLock.RLock()
+	armed := len(m.nodeTimers)
+	m.nodeLock.RUnlock()
+	require.Zero(t, armed, "suspicion timer armed on a shut-down instance")
+}
+
 // countingEventDelegate counts NotifyLeave calls.
 type countingEventDelegate struct {
 	leaves atomic.Int32
