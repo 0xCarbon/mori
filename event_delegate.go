@@ -7,6 +7,14 @@ package mori
 // notifications about members joining and leaving. The methods in this
 // delegate may be called by multiple goroutines, but never concurrently.
 // This allows you to reason about ordering.
+//
+// The callbacks run synchronously while memberlist holds its internal node
+// lock, which is what serializes them. They must therefore return promptly
+// and must not block: a blocked callback stalls all membership processing,
+// including the ctx bound of LeaveContext/UpdateNodeContext. They also must
+// not call back into Memberlist methods that acquire the node lock
+// (Members, NumMembers, UpdateNode, Leave, ...) or they will deadlock;
+// hand off to another goroutine instead.
 type EventDelegate interface {
 	// NotifyJoin is invoked when a node is detected to have joined.
 	// The Node argument must not be modified.
@@ -28,6 +36,10 @@ type EventDelegate interface {
 //
 // Care must be taken that events are processed in a timely manner from
 // the channel, since this delegate will block until an event can be sent.
+// An unconsumed channel blocks membership processing entirely (see the
+// EventDelegate contract): size the channel buffer for the expected burst
+// of membership changes and keep a consumer running for the lifetime of
+// the memberlist instance.
 type ChannelEventDelegate struct {
 	Ch chan<- NodeEvent
 }
