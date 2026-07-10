@@ -75,7 +75,9 @@ type Memberlist struct {
 	shutdown       atomic.Uint32 // Used as an atomic boolean value
 	shutdownCh     chan struct{}
 	shutdownWG     sync.WaitGroup // Joins background goroutines on Shutdown
-	leave          atomic.Int32   // Used as an atomic boolean value
+	trackedMu      sync.Mutex
+	trackedGoids   map[uint64]struct{} // goids of shutdownWG-joined goroutines
+	leave          atomic.Int32        // Used as an atomic boolean value
 	leaveBroadcast chan struct{}
 
 	shutdownLock sync.Mutex // Serializes calls to Shutdown
@@ -244,6 +246,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 	m := &Memberlist{
 		config:               conf,
 		shutdownCh:           make(chan struct{}),
+		trackedGoids:         make(map[uint64]struct{}),
 		leaveBroadcast:       make(chan struct{}, 1),
 		leaveSem:             make(chan struct{}, 1),
 		transport:            nodeAwareTransport,
@@ -269,10 +272,10 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		return nil, err
 	}
 
-	m.shutdownWG.Go(m.streamListen)
-	m.shutdownWG.Go(m.packetListen)
-	m.shutdownWG.Go(m.packetHandler)
-	m.shutdownWG.Go(m.checkBroadcastQueueDepth)
+	m.goBackground(m.streamListen)
+	m.goBackground(m.packetListen)
+	m.goBackground(m.packetHandler)
+	m.goBackground(m.checkBroadcastQueueDepth)
 	return m, nil
 }
 
@@ -941,6 +944,41 @@ func (m *Memberlist) ProtocolVersion() uint8 {
 // to detect this node's shutdown using probing. If you wish to more
 // gracefully exit the cluster, call Leave prior to shutting down.
 //
+// goBackground runs fn on a goroutine that Shutdown joins via shutdownWG,
+// recording its goid so a re-entrant Shutdown from a delegate callback can
+// detect it would be waiting for itself. Goroutines that are themselves
+// tracked may safely spawn more (the counter is non-zero while they run).
+func (m *Memberlist) goBackground(fn func()) {
+	m.shutdownWG.Go(func() {
+		id := goid()
+		m.trackedMu.Lock()
+		m.trackedGoids[id] = struct{}{}
+		m.trackedMu.Unlock()
+		defer func() {
+			m.trackedMu.Lock()
+			delete(m.trackedGoids, id)
+			m.trackedMu.Unlock()
+		}()
+		fn()
+	})
+}
+
+// onTrackedGoroutine reports whether the caller runs on a goroutine that
+// Shutdown joins.
+func (m *Memberlist) onTrackedGoroutine() bool {
+	id := goid()
+	m.trackedMu.Lock()
+	_, ok := m.trackedGoids[id]
+	m.trackedMu.Unlock()
+	return ok
+}
+
+// Shutdown will stop any background maintenance of network activity
+// for this memberlist, causing it to appear "dead". A leave message
+// will not be broadcasted prior, so the cluster being left will have
+// to detect this node's shutdown using probing. If you wish to more
+// gracefully exit the cluster, call Leave prior to shutting down.
+//
 // Shutdown returns only after every joined background goroutine of this
 // instance (listeners, packet handler, schedule callbacks such as probe/
 // gossip/push-pull, in-flight stream handlers, and TCP ping fallbacks) has
@@ -957,6 +995,11 @@ func (m *Memberlist) ProtocolVersion() uint8 {
 // about 2×TCPTimeout when a stream peer stalls mid push/pull (accept
 // deadline plus the sendLocalState deadline reset). A delegate callback
 // that violates the non-blocking contract can delay it indefinitely.
+//
+// Exception: when Shutdown is called synchronously from a delegate
+// callback (which runs on one of the joined goroutines), it cannot wait
+// for itself. In that case the teardown still completes, but the join and
+// timer cleanup finish asynchronously and Shutdown returns immediately.
 //
 // This method is safe to call multiple times.
 func (m *Memberlist) Shutdown() error {
@@ -979,8 +1022,21 @@ func (m *Memberlist) Shutdown() error {
 	close(m.shutdownCh)
 	m.deschedule()
 
-	// Join every background goroutine. Never wait while holding nodeLock:
-	// the callbacks being joined acquire it.
+	if m.onTrackedGoroutine() {
+		// Re-entrant call from a joined goroutine (delegate callback):
+		// waiting here would deadlock on ourselves. Hand the join to an
+		// untracked reaper and return.
+		go m.finishShutdown()
+		return nil
+	}
+	m.finishShutdown()
+	return nil
+}
+
+// finishShutdown joins every background goroutine and then clears pending
+// suspicion timers. Never called while holding nodeLock: the goroutines
+// being joined acquire it.
+func (m *Memberlist) finishShutdown() {
 	m.shutdownWG.Wait()
 
 	// Stop pending suspicion timers — after the join, so timers armed by
@@ -994,7 +1050,6 @@ func (m *Memberlist) Shutdown() error {
 		delete(m.nodeTimers, node)
 	}
 	m.nodeLock.Unlock()
-	return nil
 }
 
 func (m *Memberlist) hasShutdown() bool {

@@ -3,6 +3,7 @@ package mori
 import (
 	"errors"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -163,6 +164,72 @@ func TestShutdown_PushPullOnlySchedule(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Shutdown wedged: pushPullTrigger was registered but never stopped")
 	}
+}
+
+// shutdownOnJoinDelegate calls Shutdown synchronously from NotifyJoin when
+// a peer (not self) joins — the callback runs on a tracked goroutine
+// (handleConn/packetHandler), which must not deadlock the join.
+type shutdownOnJoinDelegate struct {
+	self string
+	m    *Memberlist
+	once sync.Once
+	done chan error
+}
+
+func (d *shutdownOnJoinDelegate) NotifyJoin(n *Node) {
+	if n.Name == d.self {
+		return
+	}
+	d.once.Do(func() { d.done <- d.m.Shutdown() })
+}
+func (d *shutdownOnJoinDelegate) NotifyLeave(*Node)  {}
+func (d *shutdownOnJoinDelegate) NotifyUpdate(*Node) {}
+
+// TestShutdown_FromDelegateCallback_NoSelfJoinDeadlock: Shutdown invoked
+// synchronously from a delegate callback that runs on a tracked goroutine
+// must not wait for itself.
+func TestShutdown_FromDelegateCallback_NoSelfJoinDeadlock(t *testing.T) {
+	d := &shutdownOnJoinDelegate{done: make(chan error, 1)}
+
+	c1 := testConfig(t)
+	c1.GossipInterval = time.Millisecond
+	d.self = c1.Name
+	c1.Events = d
+
+	m1, err := Create(c1)
+	require.NoError(t, err)
+	d.m = m1
+	defer func() { _ = m1.Shutdown() }()
+
+	// m2 joins m1: m1 learns m2 inside handleConn/packetHandler (tracked),
+	// firing NotifyJoin there, which calls m1.Shutdown() synchronously.
+	c2 := testConfig(t)
+	c2.GossipInterval = time.Millisecond
+	c2.BindPort = m1.config.BindPort
+	m2, err := Create(c2)
+	require.NoError(t, err)
+	defer func() { _ = m2.Shutdown() }()
+
+	_, err = m2.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
+	require.NoError(t, err)
+
+	select {
+	case err := <-d.done:
+		require.NoError(t, err, "re-entrant Shutdown from callback must succeed")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Shutdown called from a delegate callback deadlocked (self-join)")
+	}
+
+	// The instance must still quiesce: a second, outside Shutdown call is
+	// a no-op, and the background goroutines drain.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if m1.hasShutdown() {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.True(t, m1.hasShutdown())
 }
 
 // TestSuspectNode_AfterShutdown_DoesNotArmTimer: suspect messages delivered

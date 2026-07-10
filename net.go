@@ -224,7 +224,7 @@ func (m *Memberlist) streamListen() {
 	for {
 		select {
 		case conn := <-m.transport.StreamCh():
-			m.shutdownWG.Go(func() { m.handleConn(conn) })
+			m.goBackground(func() { m.handleConn(conn) })
 
 		case <-m.shutdownCh:
 			return
@@ -655,7 +655,7 @@ func (m *Memberlist) handleIndirectPing(buf []byte, from net.Addr) {
 
 	// Setup a timer to fire off a nack if no ack is seen in time.
 	if ind.Nack {
-		m.shutdownWG.Go(func() {
+		m.goBackground(func() {
 			select {
 			case <-cancelCh:
 				return

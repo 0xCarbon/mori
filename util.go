@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,6 +21,23 @@ import (
 	"github.com/hashicorp/go-msgpack/v2/codec"
 	"github.com/sean-/seed"
 )
+
+// goid returns the current goroutine's id, parsed from the runtime stack
+// header ("goroutine 123 [running]:"). Used only to detect re-entrant
+// Shutdown from a joined goroutine — never for synchronization.
+func goid() uint64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	s := buf[len("goroutine "):n]
+	id := uint64(0)
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			break
+		}
+		id = id*10 + uint64(c-'0')
+	}
+	return id
+}
 
 // pushPullScale is the minimum number of nodes
 // before we start scaling the push/pull timing. The scale

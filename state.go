@@ -137,19 +137,19 @@ func (m *Memberlist) schedule() {
 	// Create a new probeTicker
 	if m.config.ProbeInterval > 0 {
 		t := time.NewTicker(m.config.ProbeInterval)
-		m.shutdownWG.Go(func() { m.triggerFunc(m.config.ProbeInterval, t.C, stopCh, m.probe) })
+		m.goBackground(func() { m.triggerFunc(m.config.ProbeInterval, t.C, stopCh, m.probe) })
 		m.tickers = append(m.tickers, t)
 	}
 
 	// Create a push pull ticker if needed
 	if m.config.PushPullInterval > 0 {
-		m.shutdownWG.Go(func() { m.pushPullTrigger(stopCh) })
+		m.goBackground(func() { m.pushPullTrigger(stopCh) })
 	}
 
 	// Create a gossip ticker if needed
 	if m.config.GossipInterval > 0 && m.config.GossipNodes > 0 {
 		t := time.NewTicker(m.config.GossipInterval)
-		m.shutdownWG.Go(func() { m.triggerFunc(m.config.GossipInterval, t.C, stopCh, m.gossip) })
+		m.goBackground(func() { m.triggerFunc(m.config.GossipInterval, t.C, stopCh, m.gossip) })
 		m.tickers = append(m.tickers, t)
 	}
 
@@ -464,7 +464,7 @@ HANDLE_REMOTE_FAILURE:
 	disableTcpPings := m.config.DisableTcpPings ||
 		(m.config.DisableTcpPingsForNode != nil && m.config.DisableTcpPingsForNode(node.Name))
 	if (!disableTcpPings) && (node.PMax >= 3) {
-		m.shutdownWG.Go(func() {
+		m.goBackground(func() {
 			defer close(fallbackCh)
 			didContact, err := m.sendPingAndWaitForAck(node.FullAddress(), ping, deadline)
 			if err != nil {
