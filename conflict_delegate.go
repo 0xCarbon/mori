@@ -1,7 +1,7 @@
 // Copyright IBM Corp. 2013, 2025
 // SPDX-License-Identifier: MPL-2.0
 
-package memberlist
+package mori
 
 // ConflictDelegate is a used to inform a client that
 // a node has attempted to join which would result in a

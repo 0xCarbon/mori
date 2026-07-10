@@ -1,4 +1,3 @@
-<!-- heimdall_github_prtemplate:grc-pci_dss-2024-01-05 -->
 ## Description
 
 <!-- Provide a summary of what the PR does and why it is being submitted. -->

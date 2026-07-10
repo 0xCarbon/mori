@@ -1,7 +1,7 @@
 // Copyright IBM Corp. 2013, 2026
 // SPDX-License-Identifier: MPL-2.0
 
-package memberlist
+package mori
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	iretry "github.com/hashicorp/memberlist/internal/retry"
+	iretry "github.com/0xCarbon/mori/internal/retry"
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/require"
 )
