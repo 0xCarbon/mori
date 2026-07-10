@@ -941,6 +941,12 @@ func (m *Memberlist) refute(me *nodeState, accusedInc uint32) {
 func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
+	m.aliveNodeLocked(a, notify, bootstrap)
+}
+
+// aliveNodeLocked is aliveNode for callers that already hold the nodeLock
+// write lock.
+func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap bool) {
 	state, ok := m.nodeMap[a.Node]
 
 	// It is possible that during a Leave(), there is already an aliveMsg
@@ -1251,6 +1257,12 @@ func (m *Memberlist) suspectNode(s *suspect) {
 func (m *Memberlist) deadNode(d *dead) {
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
+	m.deadNodeLocked(d)
+}
+
+// deadNodeLocked is deadNode for callers that already hold the nodeLock
+// write lock.
+func (m *Memberlist) deadNodeLocked(d *dead) {
 	state, ok := m.nodeMap[d.Node]
 
 	// If we've never heard about this node before, ignore it

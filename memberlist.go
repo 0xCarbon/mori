@@ -20,6 +20,7 @@ package mori
 
 import (
 	"container/list"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -39,6 +40,22 @@ import (
 
 var errNodeNamesAreRequired = errors.New("memberlist: node names are required by configuration but one was not provided")
 
+// Sentinel errors returned by the lifecycle methods (Create, Leave,
+// UpdateNode and their Context variants). Match with errors.Is.
+var (
+	// ErrShutdown is returned by lifecycle methods invoked after the
+	// instance has been shut down.
+	ErrShutdown = errors.New("memberlist: already shut down")
+
+	// ErrMetaTooLarge is returned when the delegate provides node meta data
+	// longer than MetaMaxSize.
+	ErrMetaTooLarge = errors.New("memberlist: node meta data exceeds size limit")
+
+	// ErrNoLocalNode is returned when the local node is missing from the
+	// node map, e.g. because the instance never went alive.
+	ErrNoLocalNode = errors.New("memberlist: local node not found in node map")
+)
+
 type Memberlist struct {
 	sequenceNum uint32        // Local sequence number
 	incarnation atomic.Uint32 // Local incarnation number
@@ -56,7 +73,17 @@ type Memberlist struct {
 	leaveBroadcast chan struct{}
 
 	shutdownLock sync.Mutex // Serializes calls to Shutdown
-	leaveLock    sync.Mutex // Serializes calls to Leave
+
+	// leaveSem is a 1-slot semaphore serializing calls to Leave. A channel
+	// rather than a mutex so acquisition can be bounded by a context.
+	//
+	// Lock ordering: leaveSem is acquired before nodeLock; shutdownLock is
+	// independent of both. nodeLock (write) is held while delegate
+	// callbacks run (EventDelegate, ConflictDelegate, AliveDelegate), so
+	// delegate implementations must not call back into Memberlist methods
+	// that acquire nodeLock (Members, UpdateNode, Leave, ...) or they will
+	// deadlock; bound such calls with a context if they cannot be avoided.
+	leaveSem chan struct{}
 
 	transport NodeAwareTransport
 
@@ -211,6 +238,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		config:               conf,
 		shutdownCh:           make(chan struct{}),
 		leaveBroadcast:       make(chan struct{}, 1),
+		leaveSem:             make(chan struct{}, 1),
 		transport:            nodeAwareTransport,
 		handoffCh:            make(chan struct{}, 1),
 		highPriorityMsgQueue: list.New(),
@@ -454,12 +482,9 @@ func (m *Memberlist) setAlive() error {
 	}
 
 	// Set any metadata from the delegate.
-	var meta []byte
-	if m.config.Delegate != nil {
-		meta = m.config.Delegate.NodeMeta(MetaMaxSize)
-		if len(meta) > MetaMaxSize {
-			panic("Node meta data provided is longer than the limit")
-		}
+	meta, err := m.delegateMeta()
+	if err != nil {
+		return err
 	}
 
 	a := alive{
@@ -506,25 +531,104 @@ func (m *Memberlist) LocalNode() *Node {
 	return &state.Node
 }
 
-// UpdateNode is used to trigger re-advertising the local node. This is
-// primarily used with a Delegate to support dynamic updates to the local
-// meta data.  This will block until the update message is successfully
-// broadcasted to a member of the cluster, if any exist or until a specified
-// timeout is reached.
-func (m *Memberlist) UpdateNode(timeout time.Duration) error {
-	// Get the node meta data
-	var meta []byte
-	if m.config.Delegate != nil {
-		meta = m.config.Delegate.NodeMeta(MetaMaxSize)
-		if len(meta) > MetaMaxSize {
-			panic("Node meta data provided is longer than the limit")
+// delegateMeta fetches the local node meta data from the delegate, if any,
+// enforcing the size limit.
+func (m *Memberlist) delegateMeta() ([]byte, error) {
+	if m.config.Delegate == nil {
+		return nil, nil
+	}
+	meta := m.config.Delegate.NodeMeta(MetaMaxSize)
+	if len(meta) > MetaMaxSize {
+		return nil, fmt.Errorf("%w: %d bytes > %d-byte limit", ErrMetaTooLarge, len(meta), MetaMaxSize)
+	}
+	return meta, nil
+}
+
+// lockNodes acquires the nodeLock write lock, giving up if ctx is done
+// first. On abandonment the pending acquisition self-cleans: a helper
+// goroutine releases the lock the moment it is eventually granted. Note
+// that a pending writer blocks new readers, so an abandoned waiter can
+// delay readers until the current lock holder releases.
+func (m *Memberlist) lockNodes(ctx context.Context) error {
+	if ctx.Done() == nil {
+		m.nodeLock.Lock()
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if m.nodeLock.TryLock() {
+		return nil
+	}
+	acquired := make(chan struct{})
+	abandoned := make(chan struct{})
+	go func() {
+		m.nodeLock.Lock()
+		select {
+		case <-abandoned:
+			m.nodeLock.Unlock()
+		case acquired <- struct{}{}:
 		}
+	}()
+	select {
+	case <-acquired:
+		return nil
+	case <-ctx.Done():
+		close(abandoned)
+		return ctx.Err()
+	}
+}
+
+// waitForBroadcast blocks until the given broadcast-notify channel fires,
+// ctx is done, or the instance shuts down (after which the broadcast would
+// never be transmitted), unless there is no other alive member to broadcast
+// to.
+func (m *Memberlist) waitForBroadcast(ctx context.Context, notifyCh <-chan struct{}, what string) error {
+	if !m.anyAlive() {
+		return nil
+	}
+	select {
+	case <-notifyCh:
+		return nil
+	case <-m.shutdownCh:
+		return fmt.Errorf("memberlist: %s broadcast interrupted: %w", what, ErrShutdown)
+	case <-ctx.Done():
+		return fmt.Errorf("memberlist: timeout waiting for %s broadcast: %w", what, ctx.Err())
+	}
+}
+
+// timeoutContext converts a legacy timeout into a context: a positive
+// timeout bounds the call, zero or negative means no bound.
+func timeoutContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(context.Background(), timeout)
+	}
+	return context.Background(), func() {}
+}
+
+// UpdateNodeContext is used to trigger re-advertising the local node. This
+// is primarily used with a Delegate to support dynamic updates to the local
+// meta data. The entire call — including internal lock acquisition and the
+// wait for the update broadcast to reach a member — is bounded by ctx.
+func (m *Memberlist) UpdateNodeContext(ctx context.Context) error {
+	if m.hasShutdown() {
+		return ErrShutdown
 	}
 
-	// Get the existing node
-	m.nodeLock.RLock()
-	state := m.nodeMap[m.config.Name]
-	m.nodeLock.RUnlock()
+	// Get the node meta data
+	meta, err := m.delegateMeta()
+	if err != nil {
+		return err
+	}
+
+	if err := m.lockNodes(ctx); err != nil {
+		return fmt.Errorf("memberlist: update node: %w", err)
+	}
+	state, ok := m.nodeMap[m.config.Name]
+	if !ok {
+		m.nodeLock.Unlock()
+		return ErrNoLocalNode
+	}
 
 	// Format a new alive message
 	a := alive{
@@ -535,22 +639,20 @@ func (m *Memberlist) UpdateNode(timeout time.Duration) error {
 		Meta:        meta,
 		Vsn:         m.config.BuildVsnArray(),
 	}
-	notifyCh := make(chan struct{})
-	m.aliveNode(&a, notifyCh, true)
+	notifyCh := make(chan struct{}, 1)
+	m.aliveNodeLocked(&a, notifyCh, true)
+	m.nodeLock.Unlock()
 
-	// Wait for the broadcast or a timeout
-	if m.anyAlive() {
-		var timeoutCh <-chan time.Time
-		if timeout > 0 {
-			timeoutCh = time.After(timeout)
-		}
-		select {
-		case <-notifyCh:
-		case <-timeoutCh:
-			return fmt.Errorf("timeout waiting for update broadcast")
-		}
-	}
-	return nil
+	// Wait for the broadcast or cancellation
+	return m.waitForBroadcast(ctx, notifyCh, "update")
+}
+
+// UpdateNode is a convenience wrapper around UpdateNodeContext: a positive
+// timeout bounds the entire call, zero or negative means no bound.
+func (m *Memberlist) UpdateNode(timeout time.Duration) error {
+	ctx, cancel := timeoutContext(timeout)
+	defer cancel()
+	return m.UpdateNodeContext(ctx)
 }
 
 // Deprecated: SendTo is deprecated in favor of SendBestEffort, which requires a node to
@@ -637,63 +739,68 @@ func (m *Memberlist) NumMembers() (alive int) {
 	return
 }
 
-// Leave will broadcast a leave message but will not shutdown the background
-// listeners, meaning the node will continue participating in gossip and state
-// updates.
+// LeaveContext will broadcast a leave message but will not shutdown the
+// background listeners, meaning the node will continue participating in
+// gossip and state updates.
 //
-// This will block until the leave message is successfully broadcasted to
-// a member of the cluster, if any exist or until a specified timeout
-// is reached.
-//
-// This method is safe to call multiple times, but must not be called
-// after the cluster is already shut down.
-func (m *Memberlist) Leave(timeout time.Duration) error {
-	m.leaveLock.Lock()
-	defer m.leaveLock.Unlock()
+// The entire call — including internal lock acquisition and the wait for
+// the leave broadcast to reach a member — is bounded by ctx. If ctx is done
+// before the leave is committed, no state is changed and the call can be
+// retried. This method is safe to call multiple times; after shutdown it
+// returns ErrShutdown.
+func (m *Memberlist) LeaveContext(ctx context.Context) error {
+	// Serialize concurrent leavers.
+	select {
+	case m.leaveSem <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("memberlist: leave: %w", ctx.Err())
+	}
+	defer func() { <-m.leaveSem }()
 
 	if m.hasShutdown() {
-		panic("leave after shutdown")
+		return ErrShutdown
+	}
+	if m.hasLeft() {
+		return nil
 	}
 
-	if !m.hasLeft() {
-		m.leave.Store(1)
-
-		m.nodeLock.Lock()
-		state, ok := m.nodeMap[m.config.Name]
-		incarnation := state.Incarnation
-		name := state.Name
+	if err := m.lockNodes(ctx); err != nil {
+		return fmt.Errorf("memberlist: leave: %w", err)
+	}
+	state, ok := m.nodeMap[m.config.Name]
+	if !ok {
 		m.nodeLock.Unlock()
-		if !ok {
-			m.logger.Printf("[WARN] memberlist: Leave but we're not in the node map.")
-			return nil
-		}
-
-		// This dead message is special, because Node and From are the
-		// same. This helps other nodes figure out that a node left
-		// intentionally. When Node equals From, other nodes know for
-		// sure this node is gone.
-		d := dead{
-			Incarnation: incarnation,
-			Node:        name,
-			From:        name,
-		}
-		m.deadNode(&d)
-
-		// Block until the broadcast goes out
-		if m.anyAlive() {
-			var timeoutCh <-chan time.Time
-			if timeout > 0 {
-				timeoutCh = time.After(timeout)
-			}
-			select {
-			case <-m.leaveBroadcast:
-			case <-timeoutCh:
-				return fmt.Errorf("timeout waiting for leave broadcast")
-			}
-		}
+		return ErrNoLocalNode
 	}
 
-	return nil
+	// Flag the leave while holding nodeLock: any queued aliveMsg about the
+	// local node is blocked on the lock and will observe the flag, so it
+	// cannot re-join us — and a ctx abort before this point leaves no
+	// state behind.
+	m.leave.Store(1)
+
+	// This dead message is special, because Node and From are the
+	// same. This helps other nodes figure out that a node left
+	// intentionally. When Node equals From, other nodes know for
+	// sure this node is gone.
+	d := dead{
+		Incarnation: state.Incarnation,
+		Node:        state.Name,
+		From:        state.Name,
+	}
+	m.deadNodeLocked(&d)
+	m.nodeLock.Unlock()
+
+	// Block until the broadcast goes out or ctx is done.
+	return m.waitForBroadcast(ctx, m.leaveBroadcast, "leave")
+}
+
+// Leave is a convenience wrapper around LeaveContext: a positive timeout
+// bounds the entire call, zero or negative means no bound.
+func (m *Memberlist) Leave(timeout time.Duration) error {
+	ctx, cancel := timeoutContext(timeout)
+	defer cancel()
+	return m.LeaveContext(ctx)
 }
 
 // Check for any other alive node.
