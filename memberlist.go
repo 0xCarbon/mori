@@ -581,10 +581,13 @@ func (m *Memberlist) lockNodes(ctx context.Context) error {
 
 // waitForBroadcast blocks until the given broadcast-notify channel fires,
 // ctx is done, or the instance shuts down (after which the broadcast would
-// never be transmitted), unless there is no other alive member to broadcast
-// to.
-func (m *Memberlist) waitForBroadcast(ctx context.Context, notifyCh <-chan struct{}, what string) error {
-	if !m.anyAlive() {
+// never be transmitted). hasPeers reports whether there was any other alive
+// member to broadcast to when the broadcast was enqueued; without one there
+// is nothing to wait for. It is a plain value so this wait acquires no
+// locks: the caller evaluates it inside the critical section that enqueued
+// the broadcast, keeping the ctx-bounded path lock-free after commit.
+func (m *Memberlist) waitForBroadcast(ctx context.Context, notifyCh <-chan struct{}, hasPeers bool, what string) error {
+	if !hasPeers {
 		return nil
 	}
 	select {
@@ -610,6 +613,10 @@ func timeoutContext(timeout time.Duration) (context.Context, context.CancelFunc)
 // is primarily used with a Delegate to support dynamic updates to the local
 // meta data. The entire call — including internal lock acquisition and the
 // wait for the update broadcast to reach a member — is bounded by ctx.
+//
+// The bound cannot cover user code: delegate callbacks (Delegate.NodeMeta,
+// EventDelegate notifications) run synchronously within the call and are
+// required not to block — see the EventDelegate contract.
 func (m *Memberlist) UpdateNodeContext(ctx context.Context) error {
 	if m.hasShutdown() {
 		return ErrShutdown
@@ -641,10 +648,11 @@ func (m *Memberlist) UpdateNodeContext(ctx context.Context) error {
 	}
 	notifyCh := make(chan struct{}, 1)
 	m.aliveNodeLocked(&a, notifyCh, true)
+	hasPeers := m.anyAliveLocked()
 	m.nodeLock.Unlock()
 
 	// Wait for the broadcast or cancellation
-	return m.waitForBroadcast(ctx, notifyCh, "update")
+	return m.waitForBroadcast(ctx, notifyCh, hasPeers, "update")
 }
 
 // UpdateNode is a convenience wrapper around UpdateNodeContext: a positive
@@ -748,6 +756,10 @@ func (m *Memberlist) NumMembers() (alive int) {
 // before the leave is committed, no state is changed and the call can be
 // retried. This method is safe to call multiple times; after shutdown it
 // returns ErrShutdown.
+//
+// The bound cannot cover user code: the EventDelegate.NotifyLeave callback
+// runs synchronously within the call and is required not to block — see
+// the EventDelegate contract.
 func (m *Memberlist) LeaveContext(ctx context.Context) error {
 	// Serialize concurrent leavers.
 	select {
@@ -789,10 +801,11 @@ func (m *Memberlist) LeaveContext(ctx context.Context) error {
 		From:        state.Name,
 	}
 	m.deadNodeLocked(&d)
+	hasPeers := m.anyAliveLocked()
 	m.nodeLock.Unlock()
 
 	// Block until the broadcast goes out or ctx is done.
-	return m.waitForBroadcast(ctx, m.leaveBroadcast, "leave")
+	return m.waitForBroadcast(ctx, m.leaveBroadcast, hasPeers, "leave")
 }
 
 // Leave is a convenience wrapper around LeaveContext: a positive timeout
@@ -807,6 +820,11 @@ func (m *Memberlist) Leave(timeout time.Duration) error {
 func (m *Memberlist) anyAlive() bool {
 	m.nodeLock.RLock()
 	defer m.nodeLock.RUnlock()
+	return m.anyAliveLocked()
+}
+
+// anyAliveLocked is anyAlive for callers that already hold nodeLock.
+func (m *Memberlist) anyAliveLocked() bool {
 	for _, n := range m.nodes {
 		if !n.DeadOrLeft() && n.Name != m.config.Name {
 			return true
