@@ -123,9 +123,10 @@ func (m *Memberlist) schedule() {
 	m.tickerLock.Lock()
 	defer m.tickerLock.Unlock()
 
-	// If we already have tickers, then don't do anything, since we're
-	// scheduled
-	if len(m.tickers) > 0 {
+	// If we already have a stop channel, then don't do anything, since
+	// we're scheduled. (Not len(m.tickers): a push/pull-only schedule
+	// starts a trigger goroutine without any ticker.)
+	if m.stopTick != nil {
 		return
 	}
 
@@ -152,9 +153,9 @@ func (m *Memberlist) schedule() {
 		m.tickers = append(m.tickers, t)
 	}
 
-	// If we made any tickers, then record the stopTick channel for
-	// later.
-	if len(m.tickers) > 0 {
+	// If we started anything — tickers or the push/pull trigger — record
+	// the stop channel so deschedule can stop every trigger goroutine.
+	if len(m.tickers) > 0 || m.config.PushPullInterval > 0 {
 		m.stopTick = stopCh
 	}
 }
@@ -212,13 +213,14 @@ func (m *Memberlist) deschedule() {
 	m.tickerLock.Lock()
 	defer m.tickerLock.Unlock()
 
-	// If we have no tickers, then we aren't scheduled.
-	if len(m.tickers) == 0 {
+	// If there is no stop channel, then we aren't scheduled.
+	if m.stopTick == nil {
 		return
 	}
 
-	// Close the stop channel so all the ticker listeners stop.
+	// Close the stop channel so all the trigger goroutines stop.
 	close(m.stopTick)
+	m.stopTick = nil
 
 	// Explicitly stop all the tickers themselves so they don't take
 	// up any more resources, and get rid of the list.
@@ -1236,33 +1238,34 @@ func (m *Memberlist) suspectNode(s *suspect) {
 	min := suspicionTimeout(m.config.SuspicionMult, n, m.config.ProbeInterval)
 	max := time.Duration(m.config.SuspicionMaxTimeoutMult) * min
 	fn := func(numConfirmations int) {
-		var d *dead
+		m.nodeLock.Lock()
+		defer m.nodeLock.Unlock()
 
 		// The expiry callback runs on an untracked timer goroutine that
 		// can slip past Shutdown's best-effort timer.Stop: never mutate
-		// state or deliver events on a shut-down instance.
+		// state or deliver events on a shut-down instance. The check must
+		// share the critical section with the mutation — Shutdown's
+		// post-join timer cleanup serializes on nodeLock, so a callback
+		// that passes here completes its mutation before Shutdown returns.
 		if m.hasShutdown() {
 			return
 		}
 
-		m.nodeLock.Lock()
 		state, ok := m.nodeMap[s.Node]
 		timeout := ok && state.State == StateSuspect && state.StateChange.Equal(changeTime)
-		if timeout {
-			d = &dead{Incarnation: state.Incarnation, Node: state.Name, From: m.config.Name}
+		if !timeout {
+			return
 		}
-		m.nodeLock.Unlock()
 
-		if timeout {
-			if k > 0 && numConfirmations < k {
-				metrics.IncrCounterWithLabels([]string{"memberlist", "degraded", "timeout"}, 1, m.metricLabels)
-			}
-
-			m.logger.Printf("[INFO] memberlist: Marking %s as failed, suspect timeout reached (%d peer confirmations)",
-				state.Name, numConfirmations)
-
-			m.deadNode(d)
+		if k > 0 && numConfirmations < k {
+			metrics.IncrCounterWithLabels([]string{"memberlist", "degraded", "timeout"}, 1, m.metricLabels)
 		}
+
+		m.logger.Printf("[INFO] memberlist: Marking %s as failed, suspect timeout reached (%d peer confirmations)",
+			state.Name, numConfirmations)
+
+		d := &dead{Incarnation: state.Incarnation, Node: state.Name, From: m.config.Name}
+		m.deadNodeLocked(d)
 	}
 	m.nodeTimers[s.Node] = newSuspicion(s.From, k, min, max, fn)
 }

@@ -141,6 +141,30 @@ func TestCreateJoinShutdown_NoGoroutineLeak(t *testing.T) {
 	require.NoError(t, m1.Shutdown())
 }
 
+// TestShutdown_PushPullOnlySchedule: with probe and gossip disabled but
+// push/pull enabled, schedule() starts no tickers — the stop channel must
+// still be recorded so deschedule can stop pushPullTrigger and Shutdown's
+// join terminates.
+func TestShutdown_PushPullOnlySchedule(t *testing.T) {
+	c := testConfig(t)
+	c.ProbeInterval = 0
+	c.GossipInterval = 0
+	c.PushPullInterval = time.Second
+
+	m, err := Create(c)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- m.Shutdown() }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown wedged: pushPullTrigger was registered but never stopped")
+	}
+}
+
 // TestSuspectNode_AfterShutdown_DoesNotArmTimer: suspect messages delivered
 // by in-flight handlers while Shutdown joins them must not arm suspicion
 // timers that would outlive the instance.
