@@ -136,19 +136,19 @@ func (m *Memberlist) schedule() {
 	// Create a new probeTicker
 	if m.config.ProbeInterval > 0 {
 		t := time.NewTicker(m.config.ProbeInterval)
-		go m.triggerFunc(m.config.ProbeInterval, t.C, stopCh, m.probe)
+		m.shutdownWG.Go(func() { m.triggerFunc(m.config.ProbeInterval, t.C, stopCh, m.probe) })
 		m.tickers = append(m.tickers, t)
 	}
 
 	// Create a push pull ticker if needed
 	if m.config.PushPullInterval > 0 {
-		go m.pushPullTrigger(stopCh)
+		m.shutdownWG.Go(func() { m.pushPullTrigger(stopCh) })
 	}
 
 	// Create a gossip ticker if needed
 	if m.config.GossipInterval > 0 && m.config.GossipNodes > 0 {
 		t := time.NewTicker(m.config.GossipInterval)
-		go m.triggerFunc(m.config.GossipInterval, t.C, stopCh, m.gossip)
+		m.shutdownWG.Go(func() { m.triggerFunc(m.config.GossipInterval, t.C, stopCh, m.gossip) })
 		m.tickers = append(m.tickers, t)
 	}
 

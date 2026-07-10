@@ -11,6 +11,7 @@ require (
 	github.com/miekg/dns v1.1.72
 	github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529
 	github.com/stretchr/testify v1.11.1
+	go.uber.org/goleak v1.3.0
 )
 
 require (

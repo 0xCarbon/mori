@@ -74,7 +74,8 @@ type Memberlist struct {
 	config         *Config
 	shutdown       atomic.Uint32 // Used as an atomic boolean value
 	shutdownCh     chan struct{}
-	leave          atomic.Int32 // Used as an atomic boolean value
+	shutdownWG     sync.WaitGroup // Joins background goroutines on Shutdown
+	leave          atomic.Int32   // Used as an atomic boolean value
 	leaveBroadcast chan struct{}
 
 	shutdownLock sync.Mutex // Serializes calls to Shutdown
@@ -268,10 +269,10 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		return nil, err
 	}
 
-	go m.streamListen()
-	go m.packetListen()
-	go m.packetHandler()
-	go m.checkBroadcastQueueDepth()
+	m.shutdownWG.Go(m.streamListen)
+	m.shutdownWG.Go(m.packetListen)
+	m.shutdownWG.Go(m.packetHandler)
+	m.shutdownWG.Go(m.checkBroadcastQueueDepth)
 	return m, nil
 }
 
@@ -940,6 +941,14 @@ func (m *Memberlist) ProtocolVersion() uint8 {
 // to detect this node's shutdown using probing. If you wish to more
 // gracefully exit the cluster, call Leave prior to shutting down.
 //
+// Shutdown returns only after every background goroutine of this instance
+// (listeners, packet handler, schedule callbacks such as probe/gossip/
+// push-pull, and in-flight stream handlers) has finished: once it returns,
+// no goroutine of this instance touches the node state or the transport.
+// The join is unconditional; it terminates promptly because all callback
+// waits are bounded (ack timeouts, connection deadlines) — but a delegate
+// callback that violates the non-blocking contract can delay it.
+//
 // This method is safe to call multiple times.
 func (m *Memberlist) Shutdown() error {
 	m.shutdownLock.Lock()
@@ -960,6 +969,21 @@ func (m *Memberlist) Shutdown() error {
 	m.shutdown.Store(1)
 	close(m.shutdownCh)
 	m.deschedule()
+
+	// Stop pending suspicion timers: their expiry callbacks mutate node
+	// state and deliver events, which must not happen after Shutdown.
+	// Stop is best-effort — a callback already fired is joined below via
+	// its deadNode broadcast being a no-op on a shut-down instance.
+	m.nodeLock.Lock()
+	for node, timer := range m.nodeTimers {
+		timer.timer.Stop()
+		delete(m.nodeTimers, node)
+	}
+	m.nodeLock.Unlock()
+
+	// Join every background goroutine. Never wait while holding nodeLock:
+	// the callbacks being joined acquire it.
+	m.shutdownWG.Wait()
 	return nil
 }
 

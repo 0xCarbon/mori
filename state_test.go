@@ -147,9 +147,10 @@ func TestMemberList_ProbeNode_Suspect(t *testing.T) {
 	n := m1.nodeMap[addr4.String()]
 	m1.probeNode(n)
 
-	// Should be marked suspect.
-	if n.State != StateSuspect {
-		t.Fatalf("Expect node to be suspect")
+	// Should be marked suspect. Read under the lock: the suspicion timer
+	// armed by probeNode writes this state concurrently.
+	if state := m1.getNodeState(addr4.String()); state != StateSuspect {
+		t.Fatalf("Expect node to be suspect, got %v", state)
 	}
 	time.Sleep(10 * time.Millisecond)
 

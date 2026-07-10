@@ -224,7 +224,7 @@ func (m *Memberlist) streamListen() {
 	for {
 		select {
 		case conn := <-m.transport.StreamCh():
-			go m.handleConn(conn)
+			m.shutdownWG.Go(func() { m.handleConn(conn) })
 
 		case <-m.shutdownCh:
 			return
@@ -655,7 +655,7 @@ func (m *Memberlist) handleIndirectPing(buf []byte, from net.Addr) {
 
 	// Setup a timer to fire off a nack if no ack is seen in time.
 	if ind.Nack {
-		go func() {
+		m.shutdownWG.Go(func() {
 			select {
 			case <-cancelCh:
 				return
@@ -669,7 +669,7 @@ func (m *Memberlist) handleIndirectPing(buf []byte, from net.Addr) {
 					m.logger.Printf("[ERR] memberlist: Failed to send nack: %s %s", err, LogStringAddress(indAddr))
 				}
 			}
-		}()
+		})
 	}
 }
 
