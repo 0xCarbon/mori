@@ -1,4 +1,4 @@
-module github.com/hashicorp/memberlist
+module github.com/0xCarbon/mori
 
 go 1.25.0
 

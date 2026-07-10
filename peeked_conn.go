@@ -15,7 +15,7 @@
 // Originally from: https://github.com/google/tcpproxy/blob/master/tcpproxy.go
 // at f5c09fbedceb69e4b238dec52cdf9f2fe9a815e2
 
-package memberlist
+package mori
 
 import "net"
 

@@ -1,7 +1,7 @@
 // Copyright IBM Corp. 2013, 2025
 // SPDX-License-Identifier: MPL-2.0
 
-package memberlist
+package mori
 
 // AliveDelegate is used to involve a client in processing
 // a node "alive" message. When a node joins, either through

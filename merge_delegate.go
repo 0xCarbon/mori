@@ -1,7 +1,7 @@
 // Copyright IBM Corp. 2013, 2025
 // SPDX-License-Identifier: MPL-2.0
 
-package memberlist
+package mori
 
 // MergeDelegate is used to involve a client in
 // a potential cluster merge operation. Namely, when

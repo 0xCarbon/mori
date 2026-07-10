@@ -2,20 +2,21 @@
 // SPDX-License-Identifier: MPL-2.0
 
 /*
-memberlist is a library that manages cluster
+Package mori is a library that manages cluster
 membership and member failure detection using a gossip based protocol.
+It is 0xCarbon's maintained hard fork of github.com/hashicorp/memberlist.
 
 The use cases for such a library are far-reaching: all distributed systems
-require membership, and memberlist is a re-usable solution to managing
+require membership, and mori is a re-usable solution to managing
 cluster membership and node failure detection.
 
-memberlist is eventually consistent but converges quickly on average.
+mori is eventually consistent but converges quickly on average.
 The speed at which it converges can be heavily tuned via various knobs
 on the protocol. Node failures are detected and network partitions are partially
 tolerated by attempting to communicate to potentially dead nodes through
 multiple routes.
 */
-package memberlist
+package mori
 
 import (
 	"container/list"
