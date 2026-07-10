@@ -937,11 +937,12 @@ func (m *Memberlist) refute(me *nodeState, accusedInc uint32) {
 }
 
 // aliveNode is invoked by the network layer when we get a message about a
-// live node.
-func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
+// live node. Callers that need broadcast notification (UpdateNodeContext)
+// use aliveNodeLocked directly.
+func (m *Memberlist) aliveNode(a *alive, bootstrap bool) {
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
-	m.aliveNodeLocked(a, notify, bootstrap)
+	m.aliveNodeLocked(a, nil, bootstrap)
 }
 
 // aliveNodeLocked is aliveNode for callers that already hold the nodeLock
@@ -1333,7 +1334,7 @@ func (m *Memberlist) mergeState(remote []pushNodeState) {
 				Meta:        r.Meta,
 				Vsn:         r.Vsn,
 			}
-			m.aliveNode(&a, nil, false)
+			m.aliveNode(&a, false)
 
 		case StateLeft:
 			d := dead{Incarnation: r.Incarnation, Node: r.Name, From: r.Name}

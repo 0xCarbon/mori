@@ -54,6 +54,11 @@ var (
 	// ErrNoLocalNode is returned when the local node is missing from the
 	// node map, e.g. because the instance never went alive.
 	ErrNoLocalNode = errors.New("memberlist: local node not found in node map")
+
+	// ErrLeft is returned by UpdateNode/UpdateNodeContext after the node
+	// has left the cluster: the update can never be broadcast, because
+	// self-alive messages are dropped once the node has left.
+	ErrLeft = errors.New("memberlist: node has left the cluster")
 )
 
 type Memberlist struct {
@@ -93,6 +98,7 @@ type Memberlist struct {
 	msgQueueLock         sync.Mutex
 
 	nodeLock   sync.RWMutex
+	lockq      lockNodesQueue        // ctx-bounded nodeLock acquisition queue
 	nodes      []*nodeState          // Known nodes
 	nodeMap    map[string]*nodeState // Maps Node.Name -> NodeState
 	nodeTimers map[string]*suspicion // Maps Node.Name -> suspicion timer
@@ -495,7 +501,7 @@ func (m *Memberlist) setAlive() error {
 		Meta:        meta,
 		Vsn:         m.config.BuildVsnArray(),
 	}
-	m.aliveNode(&a, nil, true)
+	m.aliveNode(&a, true)
 
 	return nil
 }
@@ -544,11 +550,22 @@ func (m *Memberlist) delegateMeta() ([]byte, error) {
 	return meta, nil
 }
 
+// lockNodesQueue coordinates ctx-bounded acquisitions of nodeLock so that
+// abandoned attempts do not each park a goroutine on the mutex: at most one
+// helper goroutine waits on nodeLock per instance, handing ownership to the
+// oldest still-interested caller.
+type lockNodesQueue struct {
+	mu      sync.Mutex
+	waiters []chan struct{} // each buffered(1); receiving means owning nodeLock
+	parked  bool            // a helper goroutine is live (parked or handing off)
+}
+
 // lockNodes acquires the nodeLock write lock, giving up if ctx is done
-// first. On abandonment the pending acquisition self-cleans: a helper
-// goroutine releases the lock the moment it is eventually granted. Note
-// that a pending writer blocks new readers, so an abandoned waiter can
-// delay readers until the current lock holder releases.
+// first. Bounded: no matter how many calls time out while the lock is
+// wedged, at most one helper goroutine stays parked on the lock, and it
+// self-cleans once the lock is released. Note that a pending writer blocks
+// new readers, so a parked helper can delay readers until the current lock
+// holder releases.
 func (m *Memberlist) lockNodes(ctx context.Context) error {
 	if ctx.Done() == nil {
 		m.nodeLock.Lock()
@@ -557,25 +574,70 @@ func (m *Memberlist) lockNodes(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Intentionally non-FIFO: this fast path can barge ahead of queued
+	// waiters when the lock frees up at the right instant. Fairness is
+	// bounded by the mutex's own starvation mode; all waiters are served.
 	if m.nodeLock.TryLock() {
 		return nil
 	}
-	acquired := make(chan struct{})
-	abandoned := make(chan struct{})
-	go func() {
-		m.nodeLock.Lock()
-		select {
-		case <-abandoned:
-			m.nodeLock.Unlock()
-		case acquired <- struct{}{}:
-		}
-	}()
+
+	q := &m.lockq
+	ready := make(chan struct{}, 1)
+	q.mu.Lock()
+	q.waiters = append(q.waiters, ready)
+	spawn := !q.parked
+	q.parked = true
+	q.mu.Unlock()
+	if spawn {
+		go m.lockNodesHelper()
+	}
+
 	select {
-	case <-acquired:
+	case <-ready:
 		return nil
 	case <-ctx.Done():
-		close(abandoned)
-		return ctx.Err()
+	}
+
+	// Deregister. Removal and handoff are mutually exclusive under q.mu:
+	// either we are still queued (deregister and give up) or ownership was
+	// already handed off (take the token and release the lock).
+	q.mu.Lock()
+	for i, w := range q.waiters {
+		if w == ready {
+			q.waiters = append(q.waiters[:i], q.waiters[i+1:]...)
+			q.mu.Unlock()
+			return ctx.Err()
+		}
+	}
+	q.mu.Unlock()
+	<-ready
+	m.nodeLock.Unlock()
+	return ctx.Err()
+}
+
+// lockNodesHelper acquires nodeLock on behalf of queued lockNodes callers,
+// handing ownership over FIFO. It exits — releasing the lock if nobody
+// wants it anymore — as soon as the queue drains.
+func (m *Memberlist) lockNodesHelper() {
+	q := &m.lockq
+	for {
+		m.nodeLock.Lock()
+		q.mu.Lock()
+		if len(q.waiters) == 0 {
+			q.parked = false
+			q.mu.Unlock()
+			m.nodeLock.Unlock()
+			return
+		}
+		w := q.waiters[0]
+		q.waiters = q.waiters[1:]
+		w <- struct{}{} // buffered: never blocks; the receiver owns the lock now
+		if len(q.waiters) == 0 {
+			q.parked = false
+			q.mu.Unlock()
+			return
+		}
+		q.mu.Unlock()
 	}
 }
 
@@ -631,25 +693,39 @@ func (m *Memberlist) UpdateNodeContext(ctx context.Context) error {
 	if err := m.lockNodes(ctx); err != nil {
 		return fmt.Errorf("memberlist: update node: %w", err)
 	}
-	state, ok := m.nodeMap[m.config.Name]
-	if !ok {
-		m.nodeLock.Unlock()
-		return ErrNoLocalNode
-	}
-
-	// Format a new alive message
-	a := alive{
-		Incarnation: m.nextIncarnation(),
-		Node:        m.config.Name,
-		Addr:        state.Addr,
-		Port:        state.Port,
-		Meta:        meta,
-		Vsn:         m.config.BuildVsnArray(),
-	}
 	notifyCh := make(chan struct{}, 1)
-	m.aliveNodeLocked(&a, notifyCh, true)
-	hasPeers := m.anyAliveLocked()
-	m.nodeLock.Unlock()
+	var hasPeers bool
+	// The critical section runs in a closure so the deferred unlock also
+	// covers panics from delegate callbacks inside aliveNodeLocked.
+	err = func() error {
+		defer m.nodeLock.Unlock()
+
+		// After leave, self-alive messages are dropped (aliveNodeLocked
+		// guard), so the update could never be broadcast: fail fast.
+		if m.hasLeft() {
+			return ErrLeft
+		}
+		state, ok := m.nodeMap[m.config.Name]
+		if !ok {
+			return ErrNoLocalNode
+		}
+
+		// Format a new alive message
+		a := alive{
+			Incarnation: m.nextIncarnation(),
+			Node:        m.config.Name,
+			Addr:        state.Addr,
+			Port:        state.Port,
+			Meta:        meta,
+			Vsn:         m.config.BuildVsnArray(),
+		}
+		m.aliveNodeLocked(&a, notifyCh, true)
+		hasPeers = m.anyAliveLocked()
+		return nil
+	}()
+	if err != nil {
+		return err
+	}
 
 	// Wait for the broadcast or cancellation
 	return m.waitForBroadcast(ctx, notifyCh, hasPeers, "update")
@@ -779,30 +855,39 @@ func (m *Memberlist) LeaveContext(ctx context.Context) error {
 	if err := m.lockNodes(ctx); err != nil {
 		return fmt.Errorf("memberlist: leave: %w", err)
 	}
-	state, ok := m.nodeMap[m.config.Name]
-	if !ok {
-		m.nodeLock.Unlock()
-		return ErrNoLocalNode
-	}
+	var hasPeers bool
+	// The critical section runs in a closure so the deferred unlock also
+	// covers panics from the NotifyLeave callback inside deadNodeLocked.
+	err := func() error {
+		defer m.nodeLock.Unlock()
 
-	// Flag the leave while holding nodeLock: any queued aliveMsg about the
-	// local node is blocked on the lock and will observe the flag, so it
-	// cannot re-join us — and a ctx abort before this point leaves no
-	// state behind.
-	m.leave.Store(1)
+		state, ok := m.nodeMap[m.config.Name]
+		if !ok {
+			return ErrNoLocalNode
+		}
 
-	// This dead message is special, because Node and From are the
-	// same. This helps other nodes figure out that a node left
-	// intentionally. When Node equals From, other nodes know for
-	// sure this node is gone.
-	d := dead{
-		Incarnation: state.Incarnation,
-		Node:        state.Name,
-		From:        state.Name,
+		// Flag the leave while holding nodeLock: any queued aliveMsg about
+		// the local node is blocked on the lock and will observe the flag,
+		// so it cannot re-join us — and a ctx abort before this point
+		// leaves no state behind.
+		m.leave.Store(1)
+
+		// This dead message is special, because Node and From are the
+		// same. This helps other nodes figure out that a node left
+		// intentionally. When Node equals From, other nodes know for
+		// sure this node is gone.
+		d := dead{
+			Incarnation: state.Incarnation,
+			Node:        state.Name,
+			From:        state.Name,
+		}
+		m.deadNodeLocked(&d)
+		hasPeers = m.anyAliveLocked()
+		return nil
+	}()
+	if err != nil {
+		return err
 	}
-	m.deadNodeLocked(&d)
-	hasPeers := m.anyAliveLocked()
-	m.nodeLock.Unlock()
 
 	// Block until the broadcast goes out or ctx is done.
 	return m.waitForBroadcast(ctx, m.leaveBroadcast, hasPeers, "leave")

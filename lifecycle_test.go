@@ -3,6 +3,7 @@ package mori
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -264,6 +265,7 @@ func TestLifecycle_ConcurrentUpdateLeaveShutdown(t *testing.T) {
 		if errors.Is(err, context.DeadlineExceeded) ||
 			errors.Is(err, context.Canceled) ||
 			errors.Is(err, ErrShutdown) ||
+			errors.Is(err, ErrLeft) ||
 			errors.Is(err, ErrNoLocalNode) {
 			continue
 		}
@@ -361,6 +363,115 @@ func TestLifecycle_E2E_UpdateAndLeavePropagate(t *testing.T) {
 	}
 }
 
+// TestLockNodes_AbandonedWaitersDoNotAccumulate: repeated ctx-expired
+// lifecycle calls while the lock is wedged must not leave one parked
+// goroutine each — the acquisition queue keeps at most one helper parked
+// per instance regardless of call count.
+func TestLockNodes_AbandonedWaitersDoNotAccumulate(t *testing.T) {
+	m := GetMemberlist(t, nil)
+	require.NoError(t, m.setAlive())
+	defer func() { _ = m.Shutdown() }()
+
+	m.nodeLock.Lock()
+
+	before := runtime.NumGoroutine()
+	for range 50 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+		err := m.UpdateNodeContext(ctx)
+		cancel()
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+	after := runtime.NumGoroutine()
+
+	// Every aborted call must have deregistered its waiter; the queue
+	// design allows at most the single parked helper to remain.
+	m.lockq.mu.Lock()
+	waiting := len(m.lockq.waiters)
+	m.lockq.mu.Unlock()
+	require.Zero(t, waiting, "aborted calls left waiters registered")
+
+	m.nodeLock.Unlock()
+
+	// Loose global sanity bound only (NumGoroutine is process-wide and
+	// noisy): 50 leaked waiters would trip it, background churn will not.
+	require.LessOrEqual(t, after-before, 10,
+		"abandoned lock waiters accumulated: %d goroutines grew over 50 aborted calls", after-before)
+
+	// Once the wedge clears, the instance must be fully usable.
+	require.NoError(t, m.UpdateNodeContext(context.Background()))
+}
+
+// panickingEventDelegate panics on NotifyUpdate to verify lifecycle calls
+// do not retain nodeLock when user callbacks panic.
+type panickingEventDelegate struct{}
+
+func (panickingEventDelegate) NotifyJoin(*Node)   {}
+func (panickingEventDelegate) NotifyLeave(*Node)  {}
+func (panickingEventDelegate) NotifyUpdate(*Node) { panic("delegate exploded") }
+
+// TestUpdateNodeContext_DelegatePanicReleasesLock: a panicking EventDelegate
+// must not leave nodeLock held — the panic propagates but the lock is
+// released, keeping the instance readable.
+func TestUpdateNodeContext_DelegatePanicReleasesLock(t *testing.T) {
+	d := &MockDelegate{}
+	d.setMeta([]byte("v1"))
+
+	m := GetMemberlist(t, func(c *Config) {
+		c.Delegate = d
+		c.Events = panickingEventDelegate{}
+	})
+	require.NoError(t, m.setAlive())
+	defer func() { _ = m.Shutdown() }()
+
+	// Change meta so aliveNodeLocked fires NotifyUpdate, which panics.
+	d.setMeta([]byte("v2"))
+	require.Panics(t, func() { _ = m.UpdateNodeContext(context.Background()) })
+
+	// The lock must have been released by the panic unwind.
+	done := make(chan struct{})
+	go func() { m.Members(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("nodeLock retained after delegate panic")
+	}
+}
+
+// TestUpdateNode_AfterLeave_ReturnsErrLeft: once the node has left, an
+// update cannot be broadcast (aliveNode drops self-alive messages after
+// leave), so the call must fail fast instead of waiting for a broadcast
+// confirmation that can never come.
+func TestUpdateNode_AfterLeave_ReturnsErrLeft(t *testing.T) {
+	c1 := testConfig(t)
+	c1.GossipInterval = time.Millisecond
+	m1, err := Create(c1)
+	require.NoError(t, err)
+	defer func() { _ = m1.Shutdown() }()
+
+	c2 := testConfig(t)
+	c2.GossipInterval = time.Millisecond
+	c2.BindPort = m1.config.BindPort
+	m2, err := Create(c2)
+	require.NoError(t, err)
+	defer func() { _ = m2.Shutdown() }()
+
+	n, err := m2.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, m2.LeaveContext(ctx))
+
+	// With a live peer present, the old behavior waited forever for a
+	// broadcast that aliveNodeLocked never enqueues after leave.
+	start := time.Now()
+	err = m2.UpdateNode(3 * time.Second)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrLeft)
+	require.Less(t, time.Since(start), time.Second, "must fail fast, not wait for the ctx bound")
+}
+
 // TestUpdateNodeContext_UnboundedReleasedByShutdown: an unbounded call
 // waiting for a broadcast that will never be transmitted must be released
 // by Shutdown instead of wedging forever.
@@ -379,7 +490,7 @@ func TestUpdateNodeContext_UnboundedReleasedByShutdown(t *testing.T) {
 		Port:        7946,
 		Vsn:         m.config.BuildVsnArray(),
 	}
-	m.aliveNode(&peer, nil, false)
+	m.aliveNode(&peer, false)
 	require.True(t, m.anyAlive())
 
 	updateDone := make(chan error, 1)
