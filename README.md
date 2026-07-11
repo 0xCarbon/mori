@@ -31,16 +31,48 @@ Mori exists to serve the [taba](https://github.com/0xCarbon/taba) stack
 
 Upstream `master` is merged in periodically when it benefits Mori.
 
+## Fork-specific features
+
+Beyond the fork point, Mori adds capabilities that are not in upstream
+memberlist (see the [CHANGELOG](CHANGELOG.md) for exact semantics):
+
+* **Configurable node-meta cap** — `Config.MetaMaxSize` sets the producer-side
+  limit (bytes) on `Delegate.NodeMeta`, validated fail-fast against the
+  transport packet budget at `Create`; oversized meta returns `ErrMetaTooLarge`
+  instead of panicking.
+* **Parallel anti-entropy** — `Config.PushPullConcurrency` runs full state
+  exchanges against multiple random alive peers per cycle, removing
+  head-of-line blocking on a slow peer.
+* **Context-aware lifecycle** — `LeaveContext(ctx)` and `UpdateNodeContext(ctx)`
+  bound the whole operation (internal lock acquisition and broadcast wait);
+  `Leave` and `UpdateNode` are thin timeout wrappers over them and now return
+  typed sentinel errors (`ErrShutdown`, `ErrMetaTooLarge`, `ErrNoLocalNode`,
+  `ErrLeft`, matchable with `errors.Is`) instead of panicking.
+* **Async ordered event delivery** — `EventDelegate` and `ConflictDelegate`
+  callbacks are dispatched asynchronously in commit order off the node lock, so
+  a blocking or re-entrant callback no longer stalls or deadlocks membership
+  processing.
+* **Deterministic shutdown** — `Shutdown` joins every background goroutine,
+  clears pending suspicion timers, and drains the event queue before returning.
+* **Transport packet-size awareness** — the optional `MaxPacketSizeTransport`
+  interface lets a transport advertise its largest deliverable payload;
+  `NetTransport` reports the 65507-byte IPv4 UDP ceiling.
+
 ## Migrating from hashicorp/memberlist
 
-The API is unchanged at the fork point; only the module path and package
-identifier differ:
+The fork point (v0.6.0) is API-compatible with upstream — only the module
+path and package identifier changed:
 
 * `import "github.com/hashicorp/memberlist"` → `import "github.com/0xCarbon/mori"`
 * `memberlist.Create(...)` → `mori.Create(...)`
 
 No `replace` directive is needed — depend on `github.com/0xCarbon/mori`
 directly.
+
+Since v0.7.0 the API has diverged from upstream: new `Config` knobs,
+context-aware `Leave`/`UpdateNode`, typed sentinel errors, and asynchronous
+`EventDelegate` delivery. See [Fork-specific features](#fork-specific-features)
+and the [CHANGELOG](CHANGELOG.md) before upgrading across that boundary.
 
 ## Usage
 
