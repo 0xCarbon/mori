@@ -25,6 +25,10 @@ const (
 	// udpRecvBufSize is a large buffer size that we attempt to set UDP
 	// sockets to in order to handle a large volume of messages.
 	udpRecvBufSize = 2 * 1024 * 1024
+
+	// maxUDPPayloadSize is the largest payload an IPv4 UDP datagram can
+	// carry: 65535 minus the 8-byte UDP header and 20-byte IP header.
+	maxUDPPayloadSize = 65507
 )
 
 // NetTransportConfig is used to configure a net transport.
@@ -263,6 +267,12 @@ func (t *NetTransport) StreamCh() <-chan net.Conn {
 func (t *NetTransport) IngestStream(conn net.Conn) error {
 	t.streamCh <- conn
 	return nil
+}
+
+// MaxPacketSize implements MaxPacketSizeTransport: a single WriteTo cannot
+// exceed the IPv4 UDP payload limit.
+func (t *NetTransport) MaxPacketSize() int {
+	return maxUDPPayloadSize
 }
 
 // See Transport.
