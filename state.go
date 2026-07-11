@@ -957,17 +957,24 @@ func (m *Memberlist) refute(me *nodeState, accusedInc uint32) {
 }
 
 // aliveNode is invoked by the network layer when we get a message about a
-// live node. Callers that need broadcast notification (UpdateNodeContext)
-// use aliveNodeLocked directly.
+// live node. Callers that need broadcast notification or an event-delivery
+// receipt (UpdateNodeContext) use aliveNodeLocked directly.
 func (m *Memberlist) aliveNode(a *alive, bootstrap bool) {
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
-	m.aliveNodeLocked(a, nil, bootstrap)
+	m.aliveNodeLocked(a, nil, bootstrap, nil)
 }
 
 // aliveNodeLocked is aliveNode for callers that already hold the nodeLock
-// write lock.
-func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap bool) {
+// write lock. receipt, when non-nil, is attached to the membership event
+// this mutation emits (if any); the caller checks receipt.attached to know
+// whether there is a delivery to wait for.
+func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap bool, receipt *eventReceipt) {
+	// Producer fence: no mutation or event admission on a shut-down
+	// instance (finishShutdown seals the queue under this same lock).
+	if m.hasShutdown() {
+		return
+	}
 	state, ok := m.nodeMap[a.Node]
 
 	// It is possible that during a Leave(), there is already an aliveMsg
@@ -991,8 +998,11 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 	// Invoke the Alive delegate if any. This can be used to filter out
 	// alive messages based on custom logic. For example, using a cluster name.
 	// Using a merge delegate is not enough, as it is possible for passive
-	// cluster merging to still occur.
-	if m.config.Alive != nil {
+	// cluster merging to still occur. Local-origin messages (bootstrap:
+	// setAlive and UpdateNodeContext) bypass the filter — AliveDelegate
+	// exists to filter REMOTE claims, and a blocking filter must not sit
+	// inside the lifecycle calls' ctx-bounded critical section.
+	if m.config.Alive != nil && !bootstrap {
 		if len(a.Vsn) < 6 {
 			m.logger.Printf("[WARN] memberlist: ignoring alive message for '%s' (%v:%d) because Vsn is not present",
 				a.Node, net.IP(a.Addr), a.Port)
@@ -1091,7 +1101,7 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 						Port: a.Port,
 						Meta: a.Meta,
 					}
-					m.runCallback(func() { m.config.Conflict.NotifyConflict(&state.Node, &other) })
+					m.enqueueEventLocked(eventConflict, &state.Node, &other, nil)
 				}
 				return
 			}
@@ -1171,16 +1181,13 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 
 	// Notify the delegate of any relevant updates
 	if m.config.Events != nil {
-		m.runCallback(func() {
-			if oldState == StateDead || oldState == StateLeft {
-				// if Dead/Left -> Alive, notify of join
-				m.config.Events.NotifyJoin(&state.Node)
-
-			} else if !bytes.Equal(oldMeta, state.Meta) {
-				// if Meta changed, trigger an update notification
-				m.config.Events.NotifyUpdate(&state.Node)
-			}
-		})
+		if oldState == StateDead || oldState == StateLeft {
+			// if Dead/Left -> Alive, notify of join
+			m.enqueueEventLocked(eventJoin, &state.Node, nil, receipt)
+		} else if !bytes.Equal(oldMeta, state.Meta) {
+			// if Meta changed, trigger an update notification
+			m.enqueueEventLocked(eventUpdate, &state.Node, nil, receipt)
+		}
 	}
 }
 
@@ -1287,7 +1294,7 @@ func (m *Memberlist) suspectNode(s *suspect) {
 			state.Name, numConfirmations)
 
 		d := &dead{Incarnation: state.Incarnation, Node: state.Name, From: m.config.Name}
-		m.deadNodeLocked(d)
+		m.deadNodeLocked(d, nil)
 	}
 	m.nodeTimers[s.Node] = newSuspicion(s.From, k, min, max, fn)
 }
@@ -1297,12 +1304,17 @@ func (m *Memberlist) suspectNode(s *suspect) {
 func (m *Memberlist) deadNode(d *dead) {
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
-	m.deadNodeLocked(d)
+	m.deadNodeLocked(d, nil)
 }
 
 // deadNodeLocked is deadNode for callers that already hold the nodeLock
-// write lock.
-func (m *Memberlist) deadNodeLocked(d *dead) {
+// write lock. receipt, when non-nil, is attached to the leave event this
+// mutation emits (if any).
+func (m *Memberlist) deadNodeLocked(d *dead, receipt *eventReceipt) {
+	// Producer fence — see aliveNodeLocked.
+	if m.hasShutdown() {
+		return
+	}
 	state, ok := m.nodeMap[d.Node]
 
 	// If we've never heard about this node before, ignore it
@@ -1355,7 +1367,7 @@ func (m *Memberlist) deadNodeLocked(d *dead) {
 
 	// Notify of death
 	if m.config.Events != nil {
-		m.runCallback(func() { m.config.Events.NotifyLeave(&state.Node) })
+		m.enqueueEventLocked(eventLeave, &state.Node, nil, receipt)
 	}
 }
 

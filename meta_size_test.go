@@ -30,7 +30,7 @@ func TestMetaMaxSize_ZeroMeansDefault(t *testing.T) {
 	d := &limitRecordingDelegate{meta: []byte("ok")}
 
 	m := GetMemberlist(t, func(c *Config) { c.Delegate = d })
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	require.Equal(t, int64(MetaMaxSize), d.lastLimit.Load(),
@@ -48,7 +48,7 @@ func TestMetaMaxSize_KnobRaisesTheCap(t *testing.T) {
 		c.Delegate = d
 		c.MetaMaxSize = 1024
 	})
-	require.NoError(t, m.setAlive(), "700 B meta must be accepted with a 1024 B cap")
+	require.NoError(t, m.setAlive(nil), "700 B meta must be accepted with a 1024 B cap")
 	defer func() { _ = m.Shutdown() }()
 
 	require.Equal(t, int64(1024), d.lastLimit.Load(),

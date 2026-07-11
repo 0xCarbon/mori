@@ -4,17 +4,26 @@
 package mori
 
 // EventDelegate is a simpler delegate that is used only to receive
-// notifications about members joining and leaving. The methods in this
-// delegate may be called by multiple goroutines, but never concurrently.
-// This allows you to reason about ordering.
+// notifications about members joining and leaving.
 //
-// The callbacks run synchronously while memberlist holds its internal node
-// lock, which is what serializes them. They must therefore return promptly
-// and must not block: a blocked callback stalls all membership processing,
-// including the ctx bound of LeaveContext/UpdateNodeContext. They also must
-// not call back into Memberlist methods that acquire the node lock
-// (Members, NumMembers, UpdateNode, Leave, ...) or they will deadlock;
-// hand off to another goroutine instead.
+// Delivery contract: events are enqueued at the commit point of the state
+// change (under the internal node lock) and delivered by a single dispatcher
+// goroutine holding no locks. Delivery is therefore single-threaded and in
+// GLOBAL COMMIT ORDER (a fortiori per-node ordered: join, then updates,
+// then leave), but asynchronous with respect to the mutating call — except
+// where a receipt restores synchrony: Create returns after the local join
+// was delivered, and LeaveContext/UpdateNodeContext confirm delivery within
+// their ctx. Node values passed to callbacks are private snapshots taken at
+// commit time.
+//
+// Callbacks MAY block and MAY call back into Memberlist (Members,
+// UpdateNode, Leave, Shutdown, ...) without deadlocking. A blocked callback
+// does not stall membership processing; it delays subsequent event delivery
+// (the queue is unbounded — memory grows), delays Shutdown's final drain,
+// and costs lifecycle callers only their ctx budget. Callbacks must not
+// synchronously wait for a lifecycle call issued from a goroutine they
+// spawned — that reintroduces a delivery cycle bounded only by that call's
+// ctx. A panic in a callback is not recovered (fail-fast).
 type EventDelegate interface {
 	// NotifyJoin is invoked when a node is detected to have joined.
 	// The Node argument must not be modified.
@@ -35,11 +44,9 @@ type EventDelegate interface {
 // function call.
 //
 // Care must be taken that events are processed in a timely manner from
-// the channel, since this delegate will block until an event can be sent.
-// An unconsumed channel blocks membership processing entirely (see the
-// EventDelegate contract): size the channel buffer for the expected burst
-// of membership changes and keep a consumer running for the lifetime of
-// the memberlist instance.
+// the channel: an unconsumed channel no longer blocks membership processing
+// (it blocks only the event dispatcher), but undelivered events accumulate
+// in memory and Shutdown's final drain waits for the channel to be read.
 type ChannelEventDelegate struct {
 	Ch chan<- NodeEvent
 }
