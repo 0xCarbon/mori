@@ -125,7 +125,11 @@ type Config struct {
 	// anti-entropy convergence latency at the cost of multiplying sync
 	// bandwidth per cycle by this factor (the pushPullScale interval
 	// stretching is unchanged) and of k concurrent remote-state buffers
-	// (the maxPushStateBytes guard applies per exchange).
+	// (the maxPushStateBytes guard applies per exchange). Peers cap
+	// concurrent inbound exchanges (maxPushPullRequests, 128): raising
+	// this fleet-wide in large clusters can make initiations fail with
+	// "Too many pending push/pull requests" on the receiving side. The
+	// value is clamped to the cluster size per cycle.
 	PushPullConcurrency int
 
 	// ProbeInterval and ProbeTimeout are used to configure probing

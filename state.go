@@ -654,8 +654,11 @@ func (m *Memberlist) gossip() {
 func (m *Memberlist) pushPull() {
 	k := max(1, m.config.PushPullConcurrency)
 
-	// Get random live nodes
+	// Get random live nodes. Clamp k to the cluster size first:
+	// kRandomNodes pre-allocates capacity k, and selection can never
+	// exceed the node count anyway.
 	m.nodeLock.RLock()
+	k = min(k, len(m.nodes))
 	nodes := kRandomNodes(k, m.nodes, func(n *nodeState) bool {
 		return n.Name == m.config.Name ||
 			n.State != StateAlive
@@ -668,8 +671,10 @@ func (m *Memberlist) pushPull() {
 	}
 
 	// Attempt the push pulls in parallel; failures are independent.
-	// mergeRemoteState serializes under nodeLock, so overlapping the
-	// network I/O is safe.
+	// Concurrent merges interleave at per-node nodeLock granularity
+	// (idempotent, incarnation-ordered — the same interleaving the
+	// receive side already exhibits), so overlapping the network I/O
+	// is safe.
 	var wg sync.WaitGroup
 	for _, node := range nodes {
 		wg.Go(func() {
