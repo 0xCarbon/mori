@@ -5,6 +5,7 @@ package mori
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -617,7 +618,9 @@ func TestMemberList_ResolveAddr_TCP_First(t *testing.T) {
 		c.DNSConfigPath = tmpFile.Name()
 	})
 	defer func() {
-		if err := m.setAlive(); err != nil {
+		// LIFO: this runs after the deferred Shutdown below, and setAlive
+		// on a shut-down instance returns ErrShutdown by design.
+		if err := m.setAlive(nil); err != nil && !errors.Is(err, ErrShutdown) {
 			t.Fatal(err)
 		}
 	}()
@@ -1866,13 +1869,22 @@ func TestAdvertiseAddr(t *testing.T) {
 }
 
 type MockConflict struct {
+	mu       sync.Mutex
 	existing *Node
 	other    *Node
 }
 
 func (m *MockConflict) NotifyConflict(existing, other *Node) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.existing = existing
 	m.other = other
+}
+
+func (m *MockConflict) get() (existing, other *Node) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.existing, m.other
 }
 
 func TestMemberlist_conflictDelegate(t *testing.T) {
@@ -1909,12 +1921,21 @@ func TestMemberlist_conflictDelegate(t *testing.T) {
 
 	yield()
 
-	// Ensure we were notified
-	if mock.existing == nil || mock.other == nil {
-		t.Fatalf("should get notified mock.existing=%v  VS mock.other=%v", mock.existing, mock.other)
+	// Ensure we were notified (delivery is async since #6)
+	var existing, other *Node
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		existing, other = mock.get()
+		if existing != nil && other != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("should get notified existing=%v other=%v", existing, other)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if mock.existing.Name != mock.other.Name {
-		t.Fatalf("bad: %v %v", mock.existing, mock.other)
+	if existing.Name != other.Name {
+		t.Fatalf("bad: %v %v", existing, other)
 	}
 }
 

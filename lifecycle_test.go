@@ -30,7 +30,7 @@ func (d *blockingEventDelegate) NotifyLeave(*Node) {
 
 func TestLeave_AfterShutdown_ReturnsErrShutdown(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	require.NoError(t, m.Shutdown())
 
 	err := m.Leave(time.Second)
@@ -40,7 +40,7 @@ func TestLeave_AfterShutdown_ReturnsErrShutdown(t *testing.T) {
 
 func TestUpdateNode_AfterShutdown_ReturnsErrShutdown(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	require.NoError(t, m.Shutdown())
 
 	err := m.UpdateNode(time.Second)
@@ -69,7 +69,7 @@ func TestUpdateNode_OversizedMeta_ReturnsErrMetaTooLarge(t *testing.T) {
 	d.setMeta([]byte("ok"))
 
 	m := GetMemberlist(t, func(c *Config) { c.Delegate = d })
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	d.setMeta(make([]byte, MetaMaxSize+1))
@@ -81,7 +81,7 @@ func TestUpdateNode_OversizedMeta_ReturnsErrMetaTooLarge(t *testing.T) {
 
 func TestUpdateNode_MissingSelf_ReturnsErrNoLocalNode(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	m.nodeLock.Lock()
@@ -95,7 +95,7 @@ func TestUpdateNode_MissingSelf_ReturnsErrNoLocalNode(t *testing.T) {
 
 func TestLeave_MissingSelf_ReturnsErrNoLocalNode(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	m.nodeLock.Lock()
@@ -109,7 +109,7 @@ func TestLeave_MissingSelf_ReturnsErrNoLocalNode(t *testing.T) {
 
 func TestUpdateNodeContext_HonorsDeadlineUnderLockContention(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	// Simulate a wedged lock holder: the deadline must bound the entire
@@ -136,7 +136,7 @@ func TestUpdateNodeContext_HonorsDeadlineUnderLockContention(t *testing.T) {
 
 func TestLeaveContext_HonorsDeadlineUnderLockContention(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	m.nodeLock.Lock()
@@ -161,11 +161,12 @@ func TestLeaveContext_HonorsDeadlineUnderLockContention(t *testing.T) {
 	require.True(t, m.hasLeft())
 }
 
-// TestLeaveContext_BlockedNotifyLeave_Issue373 reproduces the taba#373 wedge:
-// Leave runs the EventDelegate's NotifyLeave while holding nodeLock, and the
-// callback cannot return until a concurrent UpdateNode call finishes. With an
-// unbounded UpdateNode this deadlocks forever; with a ctx-bounded call the
-// update returns DeadlineExceeded, the callback completes, and Leave finishes.
+// TestLeaveContext_BlockedNotifyLeave_Issue373: the taba#373 wedge shape —
+// a NotifyLeave consumer that cannot finish until an in-flight UpdateNode
+// returns — is structurally impossible since #6: the callback runs on the
+// event dispatcher holding no locks, so the concurrent update proceeds
+// normally, the callback completes, and the leave delivery confirms. The
+// leave's ctx only bounds the delivery confirmation.
 func TestLeaveContext_BlockedNotifyLeave_Issue373(t *testing.T) {
 	d := &blockingEventDelegate{
 		entered: make(chan struct{}),
@@ -173,29 +174,27 @@ func TestLeaveContext_BlockedNotifyLeave_Issue373(t *testing.T) {
 	}
 
 	m := GetMemberlist(t, func(c *Config) { c.Events = d })
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	updateDone := make(chan error, 1)
 	go func() {
-		// Wait until Leave holds nodeLock inside NotifyLeave, then try to
-		// update: the old code wedges here forever.
+		// Once NotifyLeave is blocked on the dispatcher, an update must
+		// proceed unimpeded — the old code wedged here forever.
 		<-d.entered
-		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		err := m.UpdateNodeContext(ctx)
-		updateDone <- err
+		updateDone <- m.UpdateNodeContext(ctx)
 		close(d.release)
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	require.NoError(t, m.LeaveContext(ctx), "Leave must complete once the blocked update is bounded")
+	require.NoError(t, m.LeaveContext(ctx), "Leave must confirm once the consumer unblocks")
 
 	select {
 	case err := <-updateDone:
-		require.Error(t, err)
-		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.ErrorIs(t, err, ErrLeft, "update after committed leave fails fast")
 	case <-time.After(2 * time.Second):
 		t.Fatal("UpdateNodeContext never returned: lifecycle wedge")
 	}
@@ -369,7 +368,7 @@ func TestLifecycle_E2E_UpdateAndLeavePropagate(t *testing.T) {
 // per instance regardless of call count.
 func TestLockNodes_AbandonedWaitersDoNotAccumulate(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	m.nodeLock.Lock()
@@ -401,41 +400,10 @@ func TestLockNodes_AbandonedWaitersDoNotAccumulate(t *testing.T) {
 	require.NoError(t, m.UpdateNodeContext(context.Background()))
 }
 
-// panickingEventDelegate panics on NotifyUpdate to verify lifecycle calls
-// do not retain nodeLock when user callbacks panic.
-type panickingEventDelegate struct{}
-
-func (panickingEventDelegate) NotifyJoin(*Node)   {}
-func (panickingEventDelegate) NotifyLeave(*Node)  {}
-func (panickingEventDelegate) NotifyUpdate(*Node) { panic("delegate exploded") }
-
-// TestUpdateNodeContext_DelegatePanicReleasesLock: a panicking EventDelegate
-// must not leave nodeLock held — the panic propagates but the lock is
-// released, keeping the instance readable.
-func TestUpdateNodeContext_DelegatePanicReleasesLock(t *testing.T) {
-	d := &MockDelegate{}
-	d.setMeta([]byte("v1"))
-
-	m := GetMemberlist(t, func(c *Config) {
-		c.Delegate = d
-		c.Events = panickingEventDelegate{}
-	})
-	require.NoError(t, m.setAlive())
-	defer func() { _ = m.Shutdown() }()
-
-	// Change meta so aliveNodeLocked fires NotifyUpdate, which panics.
-	d.setMeta([]byte("v2"))
-	require.Panics(t, func() { _ = m.UpdateNodeContext(context.Background()) })
-
-	// The lock must have been released by the panic unwind.
-	done := make(chan struct{})
-	go func() { m.Members(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("nodeLock retained after delegate panic")
-	}
-}
+// The former TestUpdateNodeContext_DelegatePanicReleasesLock is gone with
+// #6: event callbacks no longer run inside the lifecycle call or under any
+// lock, and a panicking consumer is deliberately fail-fast on the event
+// dispatcher (unrecovered), matching the pre-#6 process-crash behavior.
 
 // TestUpdateNode_AfterLeave_ReturnsErrLeft: once the node has left, an
 // update cannot be broadcast (aliveNode drops self-alive messages after
@@ -477,7 +445,7 @@ func TestUpdateNode_AfterLeave_ReturnsErrLeft(t *testing.T) {
 // by Shutdown instead of wedging forever.
 func TestUpdateNodeContext_UnboundedReleasedByShutdown(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	// Inject an alive peer so anyAlive() is true. No scheduler is running
@@ -515,7 +483,7 @@ func TestUpdateNodeContext_UnboundedReleasedByShutdown(t *testing.T) {
 // wrappers now bound the entire call, not just the broadcast wait.
 func TestLeave_TimeoutWrapper_BoundsWholeCall(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	m.nodeLock.Lock()
@@ -533,7 +501,7 @@ func TestLeave_TimeoutWrapper_BoundsWholeCall(t *testing.T) {
 
 func TestUpdateNode_TimeoutWrapper_BoundsWholeCall(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	m.nodeLock.Lock()

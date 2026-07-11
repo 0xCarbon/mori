@@ -26,7 +26,7 @@ func TestTransport_Join(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if err := m1.setAlive(); err != nil {
+	if err := m1.setAlive(nil); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	m1.schedule()
@@ -43,7 +43,7 @@ func TestTransport_Join(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if err := m2.setAlive(); err != nil {
+	if err := m2.setAlive(nil); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	m2.schedule()
@@ -84,7 +84,7 @@ func TestTransport_Send(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if err := m1.setAlive(); err != nil {
+	if err := m1.setAlive(nil); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	m1.schedule()
@@ -101,7 +101,7 @@ func TestTransport_Send(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if err := m2.setAlive(); err != nil {
+	if err := m2.setAlive(nil); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	m2.schedule()

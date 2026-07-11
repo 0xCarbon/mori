@@ -84,15 +84,15 @@ type Memberlist struct {
 
 	shutdownLock sync.Mutex // Serializes calls to Shutdown
 
-	// leaveSem is a 1-slot semaphore serializing calls to Leave. A channel
-	// rather than a mutex so acquisition can be bounded by a context.
+	// leaveSem is a 1-slot semaphore serializing the COMMIT phase of Leave
+	// (never held across post-commit waits). A channel rather than a mutex
+	// so acquisition can be bounded by a context.
 	//
 	// Lock ordering: leaveSem is acquired before nodeLock; shutdownLock is
-	// independent of both. nodeLock (write) is held while delegate
-	// callbacks run (EventDelegate, ConflictDelegate, AliveDelegate), so
-	// delegate implementations must not call back into Memberlist methods
-	// that acquire nodeLock (Members, UpdateNode, Leave, ...) or they will
-	// deadlock; bound such calls with a context if they cannot be avoided.
+	// independent of both. EventDelegate/ConflictDelegate callbacks run on
+	// the event dispatcher holding no locks (see events.go); the remaining
+	// synchronous gates (AliveDelegate on remote paths, Delegate hooks) run
+	// inside protocol goroutines and must not block.
 	leaveSem chan struct{}
 
 	transport NodeAwareTransport
@@ -106,9 +106,28 @@ type Memberlist struct {
 	lockq    lockNodesQueue // ctx-bounded nodeLock acquisition queue
 	// mergeLock serializes verifyProtocol+mergeState in mergeRemoteState
 	// so concurrent exchanges cannot admit mutually incompatible states
-	// past the compatibility guard. Ordering: mergeLock before nodeLock
-	// (mergeState acquires nodeLock per node while mergeLock is held).
-	mergeLock  sync.Mutex
+	// past the compatibility guard.
+	//
+	// Full lock order: mergeLock -> nodeLock -> eventMu. leaveSem is
+	// acquired before nodeLock and never held across post-commit waits.
+	// The event dispatcher invokes consumer callbacks holding none of
+	// these.
+	mergeLock sync.Mutex
+
+	// Event delivery (see events.go). events/eventPending/eventsSealed are
+	// guarded by eventMu; enqueues happen under nodeLock -> eventMu so the
+	// queue order is the commit order. The dispatcher is joined by its own
+	// eventWG (not shutdownWG): finishShutdown first joins all producers,
+	// then seals admission under nodeLock, then joins the dispatcher.
+	eventMu      sync.Mutex
+	events       []queuedEvent
+	eventPending int
+	eventsSealed bool
+	eventSeq     uint64
+	eventWake    chan struct{}
+	eventWG      sync.WaitGroup
+	leaveReceipt *eventReceipt // published under nodeLock before the leave flag
+
 	nodes      []*nodeState          // Known nodes
 	nodeMap    map[string]*nodeState // Maps Node.Name -> NodeState
 	nodeTimers map[string]*suspicion // Maps Node.Name -> suspicion timer
@@ -261,6 +280,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		shutdownCh:           make(chan struct{}),
 		trackedGoids:         make(map[uint64]struct{}),
 		callbackGoids:        make(map[uint64]int),
+		eventWake:            make(chan struct{}, 1),
 		leaveBroadcast:       make(chan struct{}, 1),
 		leaveSem:             make(chan struct{}, 1),
 		transport:            nodeAwareTransport,
@@ -312,6 +332,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 	m.goBackground(m.packetListen)
 	m.goBackground(m.packetHandler)
 	m.goBackground(m.checkBroadcastQueueDepth)
+	m.eventWG.Go(m.eventDispatch)
 	return m, nil
 }
 
@@ -325,11 +346,23 @@ func Create(conf *Config) (*Memberlist, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := m.setAlive(); err != nil {
+	receipt := newEventReceipt()
+	if err := m.setAlive(receipt); err != nil {
 		_ = m.Shutdown()
 		return nil, err
 	}
 	m.schedule()
+
+	// Preserve the pre-#6 synchrony: NotifyJoin for the local node has been
+	// delivered before Create returns (when an EventDelegate is configured).
+	// Create has no ctx — like the old synchronous delivery, a blocking
+	// consumer blocks Create.
+	if receipt.attached {
+		select {
+		case <-receipt.done:
+		case <-m.shutdownCh:
+		}
+	}
 	return m, nil
 }
 
@@ -503,7 +536,7 @@ func (m *Memberlist) resolveAddr(hostStr string) ([]ipPort, error) {
 // setAlive is used to mark this node as being alive. This is the same
 // as if we received an alive notification our own network channel for
 // ourself.
-func (m *Memberlist) setAlive() error {
+func (m *Memberlist) setAlive(receipt *eventReceipt) error {
 	// Get the final advertise address from the transport, which may need
 	// to see which address we bound to.
 	addr, port, err := m.refreshAdvertise()
@@ -541,7 +574,13 @@ func (m *Memberlist) setAlive() error {
 		Meta:        meta,
 		Vsn:         m.config.BuildVsnArray(),
 	}
-	m.aliveNode(&a, true)
+	m.nodeLock.Lock()
+	if m.hasShutdown() {
+		m.nodeLock.Unlock()
+		return ErrShutdown
+	}
+	m.aliveNodeLocked(&a, nil, true, receipt)
+	m.nodeLock.Unlock()
 
 	return nil
 }
@@ -781,12 +820,15 @@ func timeoutContext(timeout time.Duration) (context.Context, context.CancelFunc)
 
 // UpdateNodeContext is used to trigger re-advertising the local node. This
 // is primarily used with a Delegate to support dynamic updates to the local
-// meta data. The entire call — including internal lock acquisition and the
-// wait for the update broadcast to reach a member — is bounded by ctx.
+// meta data. The entire call — including internal lock acquisition, the
+// wait for the update broadcast to reach a member, and the confirmation
+// that the resulting membership event was delivered to the EventDelegate —
+// is bounded by ctx.
 //
-// The bound cannot cover user code: delegate callbacks (Delegate.NodeMeta,
-// EventDelegate notifications) run synchronously within the call and are
-// required not to block — see the EventDelegate contract.
+// The bound cannot cover Delegate.NodeMeta, which runs synchronously before
+// the critical section and is required not to block. On ctx expiry after
+// the commit, the update IS committed and broadcast; the error only means
+// the confirmation did not arrive within ctx.
 func (m *Memberlist) UpdateNodeContext(ctx context.Context) error {
 	if m.hasShutdown() {
 		return ErrShutdown
@@ -802,12 +844,18 @@ func (m *Memberlist) UpdateNodeContext(ctx context.Context) error {
 		return fmt.Errorf("memberlist: update node: %w", err)
 	}
 	notifyCh := make(chan struct{}, 1)
+	receipt := newEventReceipt()
 	var hasPeers bool
 	// The critical section runs in a closure so the deferred unlock also
-	// covers panics from delegate callbacks inside aliveNodeLocked.
+	// covers panics on any internal path.
 	err = func() error {
 		defer m.nodeLock.Unlock()
 
+		// The shutdown flag can flip while waiting for the lock; the seal
+		// happens under this lock, so recheck before mutating.
+		if m.hasShutdown() {
+			return ErrShutdown
+		}
 		// After leave, self-alive messages are dropped (aliveNodeLocked
 		// guard), so the update could never be broadcast: fail fast.
 		if m.hasLeft() {
@@ -827,7 +875,7 @@ func (m *Memberlist) UpdateNodeContext(ctx context.Context) error {
 			Meta:        meta,
 			Vsn:         m.config.BuildVsnArray(),
 		}
-		m.aliveNodeLocked(&a, notifyCh, true)
+		m.aliveNodeLocked(&a, notifyCh, true, receipt)
 		hasPeers = m.anyAliveLocked()
 		return nil
 	}()
@@ -836,7 +884,12 @@ func (m *Memberlist) UpdateNodeContext(ctx context.Context) error {
 	}
 
 	// Wait for the broadcast or cancellation
-	return m.waitForBroadcast(ctx, notifyCh, hasPeers, "update")
+	if err := m.waitForBroadcast(ctx, notifyCh, hasPeers, "update"); err != nil {
+		return err
+	}
+	// Then for the membership event to reach the consumer (skipped when no
+	// event was emitted, or when called from inside a delegate callback).
+	return m.waitEventReceipt(ctx, receipt, "update")
 }
 
 // UpdateNode is a convenience wrapper around UpdateNodeContext: a positive
@@ -935,44 +988,63 @@ func (m *Memberlist) NumMembers() (alive int) {
 // background listeners, meaning the node will continue participating in
 // gossip and state updates.
 //
-// The entire call — including internal lock acquisition and the wait for
-// the leave broadcast to reach a member — is bounded by ctx. If ctx is done
-// before the leave is committed, no state is changed and the call can be
-// retried. This method is safe to call multiple times; after shutdown it
-// returns ErrShutdown.
-//
-// The bound cannot cover user code: the EventDelegate.NotifyLeave callback
-// runs synchronously within the call and is required not to block — see
-// the EventDelegate contract.
+// The entire call — including internal lock acquisition, the wait for the
+// leave broadcast to reach a member, and the confirmation that the leave
+// event was delivered to the EventDelegate — is bounded by ctx. If ctx is
+// done before the leave is committed, no state is changed and the call can
+// be retried. On ctx expiry after the commit, the leave IS committed and
+// broadcast; the error only means the confirmation did not arrive within
+// ctx. This method is safe to call multiple times: retries wait on the
+// original leave event's delivery (delivery-only confirmation — the
+// broadcast confirmation belongs to the committing call). After shutdown
+// it returns ErrShutdown.
 func (m *Memberlist) LeaveContext(ctx context.Context) error {
-	// Serialize concurrent leavers.
+	// leaveSem serializes the COMMIT phase only; it is released before any
+	// post-commit wait, so a re-entrant or concurrent leaver can always
+	// reach the semaphore while a committed caller waits on delivery.
 	select {
 	case m.leaveSem <- struct{}{}:
 	case <-ctx.Done():
 		return fmt.Errorf("memberlist: leave: %w", ctx.Err())
 	}
-	defer func() { <-m.leaveSem }()
 
 	if m.hasShutdown() {
+		<-m.leaveSem
 		return ErrShutdown
 	}
 	if m.hasLeft() {
-		return nil
+		// Idempotent retry: the leave is committed; wait on the persisted
+		// receipt (published under nodeLock before the leave flag, so it
+		// is always visible here).
+		r := m.leaveReceipt
+		<-m.leaveSem
+		return m.waitEventReceipt(ctx, r, "leave")
 	}
 
 	if err := m.lockNodes(ctx); err != nil {
+		<-m.leaveSem
 		return fmt.Errorf("memberlist: leave: %w", err)
 	}
 	var hasPeers bool
+	receipt := newEventReceipt()
 	// The critical section runs in a closure so the deferred unlock also
-	// covers panics from the NotifyLeave callback inside deadNodeLocked.
+	// covers panics on any internal path.
 	err := func() error {
 		defer m.nodeLock.Unlock()
 
+		// The shutdown flag can flip while waiting for the lock; the seal
+		// happens under this lock, so recheck before mutating.
+		if m.hasShutdown() {
+			return ErrShutdown
+		}
 		state, ok := m.nodeMap[m.config.Name]
 		if !ok {
 			return ErrNoLocalNode
 		}
+
+		// Publish the receipt BEFORE the leave flag: retries reach the
+		// receipt only via hasLeft, and the atomic store orders the two.
+		m.leaveReceipt = receipt
 
 		// Flag the leave while holding nodeLock: any queued aliveMsg about
 		// the local node is blocked on the lock and will observe the flag,
@@ -989,16 +1061,23 @@ func (m *Memberlist) LeaveContext(ctx context.Context) error {
 			Node:        state.Name,
 			From:        state.Name,
 		}
-		m.deadNodeLocked(&d)
+		m.deadNodeLocked(&d, receipt)
 		hasPeers = m.anyAliveLocked()
 		return nil
 	}()
+	// Release the commit semaphore before ANY post-commit wait.
+	<-m.leaveSem
 	if err != nil {
 		return err
 	}
 
-	// Block until the broadcast goes out or ctx is done.
-	return m.waitForBroadcast(ctx, m.leaveBroadcast, hasPeers, "leave")
+	// Committer-only: block until the broadcast goes out or ctx is done.
+	if err := m.waitForBroadcast(ctx, m.leaveBroadcast, hasPeers, "leave"); err != nil {
+		return err
+	}
+	// Then for the leave event to reach the consumer (skipped when no
+	// event was emitted, or when called from inside a delegate callback).
+	return m.waitEventReceipt(ctx, receipt, "leave")
 }
 
 // Leave is a convenience wrapper around LeaveContext: a positive timeout
@@ -1108,7 +1187,10 @@ func (m *Memberlist) inReentrantContext() bool {
 // Shutdown returns only after every joined background goroutine of this
 // instance (listeners, packet handler, schedule callbacks such as probe/
 // gossip/push-pull, in-flight stream handlers, and TCP ping fallbacks) has
-// finished, and all pending suspicion timers have been stopped and cleared:
+// finished, the event queue has been sealed and fully drained (the
+// dispatcher delivered every committed event and exited — a blocked event
+// consumer therefore delays Shutdown), and all pending suspicion timers
+// have been stopped and cleared:
 // once it returns, no goroutine of this instance mutates node state,
 // delivers delegate events, or touches the transport. Two bounded
 // exceptions stay untracked: a suspicion timer callback that already fired
@@ -1168,23 +1250,41 @@ func (m *Memberlist) Shutdown() error {
 	return nil
 }
 
-// finishShutdown joins every background goroutine and then clears pending
-// suspicion timers. Never called while holding nodeLock: the goroutines
-// being joined acquire it.
+// finishShutdown quiesces the instance in two phases. Phase 1 joins every
+// producer goroutine (shutdownWG) and clears pending suspicion timers.
+// Phase 2 seals event admission under nodeLock — the producer fence: any
+// mutation already inside nodeLock enqueued its event before the seal; any
+// later one observes hasShutdown under the lock and performs no mutation —
+// then wakes and joins the event dispatcher, which exits once the queue is
+// drained. Never called while holding nodeLock: the goroutines being
+// joined acquire it.
 func (m *Memberlist) finishShutdown() {
 	m.shutdownWG.Wait()
 
-	// Stop pending suspicion timers — after the join, so timers armed by
-	// in-flight handlers (suspectNode also guards against arming past this
-	// point) cannot resurrect entries. Expiry callbacks mutate node state
-	// and deliver events, which must not happen after Shutdown; a callback
-	// that already slipped past Stop is a no-op via its hasShutdown guard.
 	m.nodeLock.Lock()
+	// Seal event admission (nodeLock -> eventMu).
+	m.eventMu.Lock()
+	m.eventsSealed = true
+	m.eventMu.Unlock()
+
+	// Stop pending suspicion timers — after the producer join, so timers
+	// armed by in-flight handlers (suspectNode also guards against arming
+	// past this point) cannot resurrect entries. Expiry callbacks mutate
+	// node state and deliver events, which must not happen after Shutdown;
+	// a callback that already slipped past Stop is a no-op via its
+	// hasShutdown guard.
 	for node, timer := range m.nodeTimers {
 		timer.timer.Stop()
 		delete(m.nodeTimers, node)
 	}
 	m.nodeLock.Unlock()
+
+	// Wake the dispatcher (it may be parked on an empty queue) and join it.
+	select {
+	case m.eventWake <- struct{}{}:
+	default:
+	}
+	m.eventWG.Wait()
 }
 
 func (m *Memberlist) hasShutdown() bool {

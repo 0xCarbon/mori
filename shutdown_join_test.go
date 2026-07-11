@@ -255,7 +255,7 @@ func TestShutdown_FromUntrackedCallbackHoldingNodeLock(t *testing.T) {
 	d := &shutdownOnLeaveDelegate{done: make(chan error, 1)}
 
 	m := GetMemberlist(t, func(c *Config) { c.Events = d })
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	d.m = m
 	defer func() { _ = m.Shutdown() }()
 
@@ -293,7 +293,7 @@ func TestShutdown_ReentrantFirst_QuiescesAsynchronously(t *testing.T) {
 		// clear the timer armed below.
 		c.ProbeInterval = time.Second
 	})
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 	d.m = m
 
 	// Arm a suspicion timer for a peer: tracked goroutines self-remove on
@@ -346,30 +346,35 @@ func TestShutdown_ReentrantFirst_QuiescesAsynchronously(t *testing.T) {
 	require.Zero(t, tracked, "tracked goroutines survived quiescence")
 }
 
-// panicRecoverDelegate panics on NotifyUpdate; the caller recovers. Used to
-// prove a panicking callback does not leak the callback-context marker.
+// panicRecoverDelegate panics in the AliveDelegate gate; the caller
+// recovers. Used to prove a panicking synchronous hook does not leak the
+// callback-context marker.
 type panicRecoverDelegate struct{}
 
-func (panicRecoverDelegate) NotifyJoin(*Node)   {}
-func (panicRecoverDelegate) NotifyLeave(*Node)  {}
-func (panicRecoverDelegate) NotifyUpdate(*Node) { panic("boom") }
+func (panicRecoverDelegate) NotifyAlive(*Node) error { panic("boom") }
 
-// TestShutdown_AfterRecoveredCallbackPanic_JoinsSynchronously: a delegate
-// panic that the application recovers must not leave the goroutine marked
-// as callback context — a later Shutdown on it must join synchronously.
+// TestShutdown_AfterRecoveredCallbackPanic_JoinsSynchronously: a panic in a
+// synchronous gate hook (AliveDelegate on a remote-origin message) that the
+// application recovers must not leave the goroutine marked as callback
+// context — a later Shutdown on it must join synchronously. (EventDelegate
+// callbacks moved to the dispatcher with #6 and are fail-fast there; this
+// pins the runCallback unmark for the hooks that stayed synchronous.)
 func TestShutdown_AfterRecoveredCallbackPanic_JoinsSynchronously(t *testing.T) {
-	d := &MockDelegate{}
-	d.setMeta([]byte("v1"))
-
 	m := GetMemberlist(t, func(c *Config) {
-		c.Delegate = d
-		c.Events = panicRecoverDelegate{}
+		c.Alive = panicRecoverDelegate{}
 	})
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 
-	// Trigger NotifyUpdate (meta change) which panics; recover here.
-	d.setMeta([]byte("v2"))
-	require.Panics(t, func() { _ = m.UpdateNodeContext(context.Background()) })
+	// A remote-origin alive runs the Alive gate on THIS goroutine, inside
+	// runCallback; it panics and we recover.
+	peer := alive{
+		Incarnation: 1,
+		Node:        "peer",
+		Addr:        []byte{127, 0, 0, 2},
+		Port:        7946,
+		Vsn:         m.config.BuildVsnArray(),
+	}
+	require.Panics(t, func() { m.aliveNode(&peer, false) })
 
 	// The marker must have been released by the deferred unmark.
 	require.False(t, m.inReentrantContext(),
@@ -452,7 +457,7 @@ func TestShutdown_ConcurrentFromTrackedGoroutine(t *testing.T) {
 // timers that would outlive the instance.
 func TestSuspectNode_AfterShutdown_DoesNotArmTimer(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive())
+	require.NoError(t, m.setAlive(nil))
 
 	peer := alive{
 		Incarnation: 1,

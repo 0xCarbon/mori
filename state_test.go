@@ -1348,13 +1348,8 @@ func TestMemberList_AliveNode_NewNode(t *testing.T) {
 	}
 
 	// Check for a join message
-	select {
-	case e := <-ch:
-		if e.Node.Name != "test" {
-			t.Fatalf("bad node name")
-		}
-	default:
-		t.Fatalf("no join message")
+	if e := recvNodeEvent(t, ch); e.Node.Name != "test" {
+		t.Fatalf("bad node name")
 	}
 
 	// Check a broad cast is queued
@@ -1380,7 +1375,8 @@ func TestMemberList_AliveNode_SuspectNode(t *testing.T) {
 	a := alive{Node: "test", Addr: []byte{127, 0, 0, 1}, Incarnation: 1, Vsn: m.config.BuildVsnArray()}
 	m.aliveNode(&a, false)
 
-	// Listen only after first join
+	// Listen only after the first join was fully delivered (async since #6)
+	waitEventQuiesce(t, m)
 	ted.Toggle(true)
 
 	// Make suspect
@@ -1405,7 +1401,8 @@ func TestMemberList_AliveNode_SuspectNode(t *testing.T) {
 		t.Fatalf("bad change delta")
 	}
 
-	// Check for a no join message
+	// Check for a no join message (settle deliveries first)
+	waitEventQuiesce(t, m)
 	select {
 	case <-ch:
 		t.Fatalf("got bad join message")
@@ -1435,7 +1432,8 @@ func TestMemberList_AliveNode_Idempotent(t *testing.T) {
 	a := alive{Node: "test", Addr: []byte{127, 0, 0, 1}, Incarnation: 1, Vsn: m.config.BuildVsnArray()}
 	m.aliveNode(&a, false)
 
-	// Listen only after first join
+	// Listen only after the first join was fully delivered (async since #6)
+	waitEventQuiesce(t, m)
 	ted.Toggle(true)
 
 	// Make suspect
@@ -1453,7 +1451,8 @@ func TestMemberList_AliveNode_Idempotent(t *testing.T) {
 		t.Fatalf("should not change state")
 	}
 
-	// Check for a no join message
+	// Check for a no join message (settle deliveries first)
+	waitEventQuiesce(t, m)
 	select {
 	case <-ch:
 		t.Fatalf("got bad join message")
@@ -1463,6 +1462,39 @@ func TestMemberList_AliveNode_Idempotent(t *testing.T) {
 	// Check a broad cast is queued
 	if m.broadcasts.NumQueued() != 1 {
 		t.Fatalf("expected only one queued message")
+	}
+}
+
+// recvNodeEvent receives one event with a bound — delivery is asynchronous
+// since #6.
+func recvNodeEvent(t *testing.T, ch <-chan NodeEvent) NodeEvent {
+	t.Helper()
+	select {
+	case e := <-ch:
+		return e
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for node event")
+		return NodeEvent{}
+	}
+}
+
+// waitEventQuiesce blocks until the event dispatcher has delivered every
+// committed event, so a subsequent negative assertion (or a delegate
+// toggle) observes a settled state.
+func waitEventQuiesce(t *testing.T, m *Memberlist) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		m.eventMu.Lock()
+		pending := m.eventPending
+		m.eventMu.Unlock()
+		if pending == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("event queue never quiesced: %d pending", pending)
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
@@ -1533,7 +1565,8 @@ func TestMemberList_AliveNode_ChangeMeta(t *testing.T) {
 		Vsn:         m.config.BuildVsnArray()}
 	m.aliveNode(&a, false)
 
-	// Listen only after first join
+	// Listen only after the first join was fully delivered (async since #6)
+	waitEventQuiesce(t, m)
 	ted.Toggle(true)
 
 	// Make suspect
@@ -1550,19 +1583,15 @@ func TestMemberList_AliveNode_ChangeMeta(t *testing.T) {
 	}
 
 	// Check for a NotifyUpdate
-	select {
-	case e := <-ch:
-		if e.Event != NodeUpdate {
-			t.Fatalf("bad event: %v", e)
-		}
-		if !reflect.DeepEqual(*e.Node, state.Node) {
-			t.Fatalf("expected %v, got %v", *e.Node, state.Node)
-		}
-		if !bytes.Equal(e.Node.Meta, a.Meta) {
-			t.Fatalf("meta did not update")
-		}
-	default:
-		t.Fatalf("missing event!")
+	e := recvNodeEvent(t, ch)
+	if e.Event != NodeUpdate {
+		t.Fatalf("bad event: %v", e)
+	}
+	if !reflect.DeepEqual(*e.Node, state.Node) {
+		t.Fatalf("expected %v, got %v", *e.Node, state.Node)
+	}
+	if !bytes.Equal(e.Node.Meta, a.Meta) {
+		t.Fatalf("meta did not update")
 	}
 
 }
@@ -2019,13 +2048,8 @@ func TestMemberList_DeadNode(t *testing.T) {
 		t.Fatalf("bad change delta")
 	}
 
-	select {
-	case leave := <-ch:
-		if leave.Event != NodeLeave || leave.Node.Name != "test" {
-			t.Fatalf("bad node name")
-		}
-	default:
-		t.Fatalf("no leave message")
+	if leave := recvNodeEvent(t, ch); leave.Event != NodeLeave || leave.Node.Name != "test" {
+		t.Fatalf("bad node name")
 	}
 
 	// Check a broad cast is queued
@@ -2067,6 +2091,7 @@ func TestMemberList_DeadNode_Double(t *testing.T) {
 	d.Incarnation = 2
 	m.deadNode(&d)
 
+	waitEventQuiesce(t, m)
 	select {
 	case <-ch:
 		t.Fatalf("should not get leave")
@@ -2242,15 +2267,11 @@ func TestMemberList_MergeState(t *testing.T) {
 	}
 
 	// Check the channels
-	select {
-	case e := <-eventCh:
-		if e.Event != NodeJoin || e.Node.Name != "test4" {
-			t.Fatalf("bad node %v", e)
-		}
-	default:
-		t.Fatalf("Expect join")
+	if e := recvNodeEvent(t, eventCh); e.Event != NodeJoin || e.Node.Name != "test4" {
+		t.Fatalf("bad node %v", e)
 	}
 
+	waitEventQuiesce(t, m)
 	select {
 	case e := <-eventCh:
 		t.Fatalf("Unexpect event: %v", e)
