@@ -141,8 +141,29 @@ func TestShuffleNodes(t *testing.T) {
 
 	shuffleNodes(nodes)
 
-	if reflect.DeepEqual(nodes, orig) {
-		t.Fatalf("should not match")
+	// A shuffle must preserve the exact pointer multiset — nothing added,
+	// dropped, or duplicated. It must NOT be asserted to change the
+	// arrangement: with only two distinct states among 8 nodes, a valid
+	// random permutation reproduces a DeepEqual-identical slice with
+	// probability 3!*5!/8! = 1/56 — the source of a long-standing flake
+	// (upstream memberlist#202, mori#11).
+	if len(nodes) != len(orig) {
+		t.Fatalf("shuffle changed length: %d != %d", len(nodes), len(orig))
+	}
+	seen := make(map[*nodeState]int, len(orig))
+	for _, n := range orig {
+		seen[n]++
+	}
+	for _, n := range nodes {
+		seen[n]--
+		if seen[n] < 0 {
+			t.Fatalf("shuffle introduced or duplicated a node: %p", n)
+		}
+	}
+	for _, count := range seen {
+		if count != 0 {
+			t.Fatalf("shuffle dropped nodes: %v", seen)
+		}
 	}
 }
 
