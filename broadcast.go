@@ -93,7 +93,8 @@ func (m *Memberlist) getBroadcasts(overhead, limit int) [][]byte {
 		// Check space remaining for user messages
 		avail := limit - bytesUsed
 		if avail > overhead+userMsgOverhead {
-			userMsgs := d.GetBroadcasts(overhead+userMsgOverhead, avail)
+			var userMsgs [][]byte
+			m.runCallback(func() { userMsgs = d.GetBroadcasts(overhead+userMsgOverhead, avail) })
 
 			// Frame each user message
 			for _, msg := range userMsgs {

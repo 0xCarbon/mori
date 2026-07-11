@@ -123,9 +123,10 @@ func (m *Memberlist) schedule() {
 	m.tickerLock.Lock()
 	defer m.tickerLock.Unlock()
 
-	// If we already have tickers, then don't do anything, since we're
-	// scheduled
-	if len(m.tickers) > 0 {
+	// If we already have a stop channel, then don't do anything, since
+	// we're scheduled. (Not len(m.tickers): a push/pull-only schedule
+	// starts a trigger goroutine without any ticker.)
+	if m.stopTick != nil {
 		return
 	}
 
@@ -136,25 +137,25 @@ func (m *Memberlist) schedule() {
 	// Create a new probeTicker
 	if m.config.ProbeInterval > 0 {
 		t := time.NewTicker(m.config.ProbeInterval)
-		go m.triggerFunc(m.config.ProbeInterval, t.C, stopCh, m.probe)
+		m.goBackground(func() { m.triggerFunc(m.config.ProbeInterval, t.C, stopCh, m.probe) })
 		m.tickers = append(m.tickers, t)
 	}
 
 	// Create a push pull ticker if needed
 	if m.config.PushPullInterval > 0 {
-		go m.pushPullTrigger(stopCh)
+		m.goBackground(func() { m.pushPullTrigger(stopCh) })
 	}
 
 	// Create a gossip ticker if needed
 	if m.config.GossipInterval > 0 && m.config.GossipNodes > 0 {
 		t := time.NewTicker(m.config.GossipInterval)
-		go m.triggerFunc(m.config.GossipInterval, t.C, stopCh, m.gossip)
+		m.goBackground(func() { m.triggerFunc(m.config.GossipInterval, t.C, stopCh, m.gossip) })
 		m.tickers = append(m.tickers, t)
 	}
 
-	// If we made any tickers, then record the stopTick channel for
-	// later.
-	if len(m.tickers) > 0 {
+	// If we started anything — tickers or the push/pull trigger — record
+	// the stop channel so deschedule can stop every trigger goroutine.
+	if len(m.tickers) > 0 || m.config.PushPullInterval > 0 {
 		m.stopTick = stopCh
 	}
 }
@@ -212,13 +213,14 @@ func (m *Memberlist) deschedule() {
 	m.tickerLock.Lock()
 	defer m.tickerLock.Unlock()
 
-	// If we have no tickers, then we aren't scheduled.
-	if len(m.tickers) == 0 {
+	// If there is no stop channel, then we aren't scheduled.
+	if m.stopTick == nil {
 		return
 	}
 
-	// Close the stop channel so all the ticker listeners stop.
+	// Close the stop channel so all the trigger goroutines stop.
 	close(m.stopTick)
+	m.stopTick = nil
 
 	// Explicitly stop all the tickers themselves so they don't take
 	// up any more resources, and get rid of the list.
@@ -393,7 +395,7 @@ func (m *Memberlist) probeNode(node *nodeState) {
 		if v.Complete {
 			if m.config.Ping != nil {
 				rtt := v.Timestamp.Sub(sent)
-				m.config.Ping.NotifyPingComplete(&node.Node, rtt, v.Payload)
+				m.runCallback(func() { m.config.Ping.NotifyPingComplete(&node.Node, rtt, v.Payload) })
 			}
 			return
 		}
@@ -462,7 +464,7 @@ HANDLE_REMOTE_FAILURE:
 	disableTcpPings := m.config.DisableTcpPings ||
 		(m.config.DisableTcpPingsForNode != nil && m.config.DisableTcpPingsForNode(node.Name))
 	if (!disableTcpPings) && (node.PMax >= 3) {
-		go func() {
+		m.goBackground(func() {
 			defer close(fallbackCh)
 			didContact, err := m.sendPingAndWaitForAck(node.FullAddress(), ping, deadline)
 			if err != nil {
@@ -474,7 +476,7 @@ HANDLE_REMOTE_FAILURE:
 			} else {
 				fallbackCh <- didContact
 			}
-		}()
+		})
 	} else {
 		close(fallbackCh)
 	}
@@ -990,7 +992,9 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 			DMax: a.Vsn[4],
 			DCur: a.Vsn[5],
 		}
-		if err := m.config.Alive.NotifyAlive(node); err != nil {
+		var err error
+		m.runCallback(func() { err = m.config.Alive.NotifyAlive(node) })
+		if err != nil {
 			m.logger.Printf("[WARN] memberlist: ignoring alive message for '%s': %s",
 				a.Node, err)
 			return
@@ -1069,7 +1073,7 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 						Port: a.Port,
 						Meta: a.Meta,
 					}
-					m.config.Conflict.NotifyConflict(&state.Node, &other)
+					m.runCallback(func() { m.config.Conflict.NotifyConflict(&state.Node, &other) })
 				}
 				return
 			}
@@ -1149,14 +1153,16 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 
 	// Notify the delegate of any relevant updates
 	if m.config.Events != nil {
-		if oldState == StateDead || oldState == StateLeft {
-			// if Dead/Left -> Alive, notify of join
-			m.config.Events.NotifyJoin(&state.Node)
+		m.runCallback(func() {
+			if oldState == StateDead || oldState == StateLeft {
+				// if Dead/Left -> Alive, notify of join
+				m.config.Events.NotifyJoin(&state.Node)
 
-		} else if !bytes.Equal(oldMeta, state.Meta) {
-			// if Meta changed, trigger an update notification
-			m.config.Events.NotifyUpdate(&state.Node)
-		}
+			} else if !bytes.Equal(oldMeta, state.Meta) {
+				// if Meta changed, trigger an update notification
+				m.config.Events.NotifyUpdate(&state.Node)
+			}
+		})
 	}
 }
 
@@ -1165,6 +1171,13 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 func (m *Memberlist) suspectNode(s *suspect) {
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
+
+	// Never arm a suspicion timer on a shut-down instance: in-flight
+	// stream handlers can still deliver suspect messages while Shutdown
+	// joins them, and their timers would outlive the join.
+	if m.hasShutdown() {
+		return
+	}
 	state, ok := m.nodeMap[s.Node]
 
 	// If we've never heard about this node before, ignore it
@@ -1229,26 +1242,34 @@ func (m *Memberlist) suspectNode(s *suspect) {
 	min := suspicionTimeout(m.config.SuspicionMult, n, m.config.ProbeInterval)
 	max := time.Duration(m.config.SuspicionMaxTimeoutMult) * min
 	fn := func(numConfirmations int) {
-		var d *dead
-
 		m.nodeLock.Lock()
+		defer m.nodeLock.Unlock()
+
+		// The expiry callback runs on an untracked timer goroutine that
+		// can slip past Shutdown's best-effort timer.Stop: never mutate
+		// state or deliver events on a shut-down instance. The check must
+		// share the critical section with the mutation — Shutdown's
+		// post-join timer cleanup serializes on nodeLock, so a callback
+		// that passes here completes its mutation before Shutdown returns.
+		if m.hasShutdown() {
+			return
+		}
+
 		state, ok := m.nodeMap[s.Node]
 		timeout := ok && state.State == StateSuspect && state.StateChange.Equal(changeTime)
-		if timeout {
-			d = &dead{Incarnation: state.Incarnation, Node: state.Name, From: m.config.Name}
+		if !timeout {
+			return
 		}
-		m.nodeLock.Unlock()
 
-		if timeout {
-			if k > 0 && numConfirmations < k {
-				metrics.IncrCounterWithLabels([]string{"memberlist", "degraded", "timeout"}, 1, m.metricLabels)
-			}
-
-			m.logger.Printf("[INFO] memberlist: Marking %s as failed, suspect timeout reached (%d peer confirmations)",
-				state.Name, numConfirmations)
-
-			m.deadNode(d)
+		if k > 0 && numConfirmations < k {
+			metrics.IncrCounterWithLabels([]string{"memberlist", "degraded", "timeout"}, 1, m.metricLabels)
 		}
+
+		m.logger.Printf("[INFO] memberlist: Marking %s as failed, suspect timeout reached (%d peer confirmations)",
+			state.Name, numConfirmations)
+
+		d := &dead{Incarnation: state.Incarnation, Node: state.Name, From: m.config.Name}
+		m.deadNodeLocked(d)
 	}
 	m.nodeTimers[s.Node] = newSuspicion(s.From, k, min, max, fn)
 }
@@ -1316,7 +1337,7 @@ func (m *Memberlist) deadNodeLocked(d *dead) {
 
 	// Notify of death
 	if m.config.Events != nil {
-		m.config.Events.NotifyLeave(&state.Node)
+		m.runCallback(func() { m.config.Events.NotifyLeave(&state.Node) })
 	}
 }
 

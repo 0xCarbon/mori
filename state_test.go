@@ -144,12 +144,15 @@ func TestMemberList_ProbeNode_Suspect(t *testing.T) {
 	a4 := alive{Node: addr4.String(), Addr: ip4, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a4, false)
 
+	m1.nodeLock.RLock()
 	n := m1.nodeMap[addr4.String()]
+	m1.nodeLock.RUnlock()
 	m1.probeNode(n)
 
-	// Should be marked suspect.
-	if n.State != StateSuspect {
-		t.Fatalf("Expect node to be suspect")
+	// Should be marked suspect. Read under the lock: the suspicion timer
+	// armed by probeNode writes this state concurrently.
+	if state := m1.getNodeState(addr4.String()); state != StateSuspect {
+		t.Fatalf("Expect node to be suspect, got %v", state)
 	}
 	time.Sleep(10 * time.Millisecond)
 

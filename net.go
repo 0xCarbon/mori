@@ -224,7 +224,7 @@ func (m *Memberlist) streamListen() {
 	for {
 		select {
 		case conn := <-m.transport.StreamCh():
-			go m.handleConn(conn)
+			m.goBackground(func() { m.handleConn(conn) })
 
 		case <-m.shutdownCh:
 			return
@@ -572,7 +572,7 @@ func (m *Memberlist) handlePing(buf []byte, from net.Addr) {
 	var ack ackResp
 	ack.SeqNo = p.SeqNo
 	if m.config.Ping != nil {
-		ack.Payload = m.config.Ping.AckPayload()
+		m.runCallback(func() { ack.Payload = m.config.Ping.AckPayload() })
 	}
 
 	addr := ""
@@ -655,7 +655,7 @@ func (m *Memberlist) handleIndirectPing(buf []byte, from net.Addr) {
 
 	// Setup a timer to fire off a nack if no ack is seen in time.
 	if ind.Nack {
-		go func() {
+		m.goBackground(func() {
 			select {
 			case <-cancelCh:
 				return
@@ -669,7 +669,7 @@ func (m *Memberlist) handleIndirectPing(buf []byte, from net.Addr) {
 					m.logger.Printf("[ERR] memberlist: Failed to send nack: %s %s", err, LogStringAddress(indAddr))
 				}
 			}
-		}()
+		})
 	}
 }
 
@@ -764,7 +764,7 @@ func (m *Memberlist) handleDead(buf []byte, from net.Addr) {
 func (m *Memberlist) handleUser(buf []byte, _ net.Addr) {
 	d := m.config.Delegate
 	if d != nil {
-		d.NotifyMsg(buf)
+		m.runCallback(func() { d.NotifyMsg(buf) })
 	}
 }
 
@@ -1049,7 +1049,7 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 	// Get the delegate state
 	var userData []byte
 	if m.config.Delegate != nil {
-		userData = m.config.Delegate.LocalState(join)
+		m.runCallback(func() { userData = m.config.Delegate.LocalState(join) })
 	}
 
 	// Create a bytes buffer writer
@@ -1302,7 +1302,9 @@ func (m *Memberlist) mergeRemoteState(join bool, remoteNodes []pushNodeState, us
 				DCur:  n.Vsn[5],
 			}
 		}
-		if err := m.config.Merge.NotifyMerge(nodes); err != nil {
+		var err error
+		m.runCallback(func() { err = m.config.Merge.NotifyMerge(nodes) })
+		if err != nil {
 			return err
 		}
 	}
@@ -1312,7 +1314,7 @@ func (m *Memberlist) mergeRemoteState(join bool, remoteNodes []pushNodeState, us
 
 	// Invoke the delegate for user state
 	if userBuf != nil && m.config.Delegate != nil {
-		m.config.Delegate.MergeRemoteState(userBuf, join)
+		m.runCallback(func() { m.config.Delegate.MergeRemoteState(userBuf, join) })
 	}
 	return nil
 }
@@ -1341,7 +1343,7 @@ func (m *Memberlist) readUserMsg(bufConn io.Reader, dec *codec.Decoder) error {
 
 		d := m.config.Delegate
 		if d != nil {
-			d.NotifyMsg(userBuf)
+			m.runCallback(func() { d.NotifyMsg(userBuf) })
 		}
 	}
 
