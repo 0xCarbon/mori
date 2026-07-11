@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -647,11 +648,15 @@ func (m *Memberlist) gossip() {
 // pushPull is invoked periodically to randomly perform a complete state
 // exchange. Used to ensure a high level of convergence, but is also
 // reasonably expensive as the entire state of this node is exchanged
-// with the other node.
+// with the other node. With PushPullConcurrency > 1, that many distinct
+// random peers are exchanged with in parallel and joined before returning,
+// so one slow exchange cannot head-of-line-block the cycle.
 func (m *Memberlist) pushPull() {
-	// Get a random live node
+	k := max(1, m.config.PushPullConcurrency)
+
+	// Get random live nodes
 	m.nodeLock.RLock()
-	nodes := kRandomNodes(1, m.nodes, func(n *nodeState) bool {
+	nodes := kRandomNodes(k, m.nodes, func(n *nodeState) bool {
 		return n.Name == m.config.Name ||
 			n.State != StateAlive
 	})
@@ -661,12 +666,19 @@ func (m *Memberlist) pushPull() {
 	if len(nodes) == 0 {
 		return
 	}
-	node := nodes[0]
 
-	// Attempt a push pull
-	if err := m.pushPullNode(node.FullAddress(), false); err != nil {
-		m.logger.Printf("[ERR] memberlist: Push/Pull with %s failed: %s", node.Name, err)
+	// Attempt the push pulls in parallel; failures are independent.
+	// mergeRemoteState serializes under nodeLock, so overlapping the
+	// network I/O is safe.
+	var wg sync.WaitGroup
+	for _, node := range nodes {
+		wg.Go(func() {
+			if err := m.pushPullNode(node.FullAddress(), false); err != nil {
+				m.logger.Printf("[ERR] memberlist: Push/Pull with %s failed: %s", node.Name, err)
+			}
+		})
 	}
+	wg.Wait()
 }
 
 // pushPullNode does a complete state exchange with a specific node.

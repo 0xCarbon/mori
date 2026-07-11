@@ -118,6 +118,16 @@ type Config struct {
 	// usage.
 	PushPullInterval time.Duration
 
+	// PushPullConcurrency is the number of distinct random peers to run
+	// full state exchanges against, in parallel, on every push/pull cycle.
+	// Zero or one keeps the classic single-peer scheduling. Raising it
+	// removes head-of-line blocking on a slow exchange and cuts
+	// anti-entropy convergence latency at the cost of multiplying sync
+	// bandwidth per cycle by this factor (the pushPullScale interval
+	// stretching is unchanged) and of k concurrent remote-state buffers
+	// (the maxPushStateBytes guard applies per exchange).
+	PushPullConcurrency int
+
 	// ProbeInterval and ProbeTimeout are used to configure probing
 	// behavior for memberlist.
 	//
