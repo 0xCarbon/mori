@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -265,6 +266,16 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 	}
 	m.broadcasts.NumNodes = func() int {
 		return m.estNumNodes()
+	}
+
+	// Fail fast if a full-size alive message could never fit the transport
+	// packet budget — otherwise gossip drops oversized packets at runtime
+	// with no clear signal.
+	if err := m.validateMetaMaxSize(); err != nil {
+		if serr := m.transport.Shutdown(); serr != nil {
+			logger.Printf("[ERR] Failed to shutdown transport: %v", serr)
+		}
+		return nil, err
 	}
 
 	// Get the final advertise address from the transport, which may need
@@ -543,18 +554,73 @@ func (m *Memberlist) LocalNode() *Node {
 	return &state.Node
 }
 
+// metaMaxSize returns the effective producer-side cap on node meta data:
+// Config.MetaMaxSize, or the MetaMaxSize default when unset.
+func (m *Memberlist) metaMaxSize() int {
+	if m.config.MetaMaxSize > 0 {
+		return m.config.MetaMaxSize
+	}
+	return MetaMaxSize
+}
+
 // delegateMeta fetches the local node meta data from the delegate, if any,
 // enforcing the size limit.
 func (m *Memberlist) delegateMeta() ([]byte, error) {
 	if m.config.Delegate == nil {
 		return nil, nil
 	}
+	limit := m.metaMaxSize()
 	var meta []byte
-	m.runCallback(func() { meta = m.config.Delegate.NodeMeta(MetaMaxSize) })
-	if len(meta) > MetaMaxSize {
-		return nil, fmt.Errorf("%w: %d bytes > %d-byte limit", ErrMetaTooLarge, len(meta), MetaMaxSize)
+	m.runCallback(func() { meta = m.config.Delegate.NodeMeta(limit) })
+	if len(meta) > limit {
+		return nil, fmt.Errorf("%w: %d bytes > %d-byte limit", ErrMetaTooLarge, len(meta), limit)
 	}
 	return meta, nil
+}
+
+// validateMetaMaxSize checks at construction time that a worst-case alive
+// message — IPv6 address, max port/incarnation, meta at the configured
+// cap — fits the transport packet budget.
+func (m *Memberlist) validateMetaMaxSize() error {
+	limit := m.metaMaxSize()
+
+	a := alive{
+		Incarnation: math.MaxUint32,
+		Node:        m.config.Name,
+		Addr:        make([]byte, 16),
+		Port:        math.MaxUint16,
+		Meta:        make([]byte, limit),
+		Vsn:         m.config.BuildVsnArray(),
+	}
+	buf, err := encode(aliveMsg, &a, m.config.MsgpackUseNewTimeFormat)
+	if err != nil {
+		return fmt.Errorf("memberlist: could not size a full alive message: %w", err)
+	}
+	msgSize := buf.Len()
+
+	budget := m.config.UDPBufferSize
+	if size, ok := maxPacketSizeOf(m.transport); ok {
+		if budget <= 0 {
+			budget = size
+		} else {
+			budget = min(budget, size)
+		}
+	}
+	if budget <= 0 {
+		// No packet budget configured and none advertised: nothing to
+		// validate against (degenerate, stream-only style setups).
+		return nil
+	}
+	budget -= labelOverhead(m.config.Label)
+	if m.config.EncryptionEnabled() {
+		budget -= encryptOverhead(m.encryptionVersion())
+	}
+
+	if msgSize > budget {
+		return fmt.Errorf("memberlist: MetaMaxSize %d does not fit the transport packet budget: a full-size alive message is %d bytes but only %d are available (UDPBufferSize or the transport's MaxPacketSize, minus label and encryption overhead)",
+			limit, msgSize, budget)
+	}
+	return nil
 }
 
 // lockNodesQueue coordinates ctx-bounded acquisitions of nodeLock so that

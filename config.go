@@ -240,6 +240,20 @@ type Config struct {
 	// called PacketBufferSize now that we have generalized the transport.
 	UDPBufferSize int
 
+	// MetaMaxSize is the producer-side cap, in bytes, on the node meta
+	// data returned by Delegate.NodeMeta. Zero means the default
+	// (MetaMaxSize, 512 bytes). Create validates that a full-size alive
+	// message (name + address + meta at this cap + envelope) fits the
+	// transport packet budget (UDPBufferSize minus label and encryption
+	// overhead, or the transport's MaxPacketSize if it advertises one) and
+	// fails fast otherwise.
+	//
+	// Rolling upgrades: the cap applies only when producing the local
+	// node's meta — the receive path accepts whatever peers gossip. A
+	// cluster can therefore be upgraded node by node before raising the
+	// knob anywhere.
+	MetaMaxSize int
+
 	// DeadNodeReclaimTime controls the time before a dead node's name can be
 	// reclaimed by one with a different address or port. By default, this is 0,
 	// meaning nodes cannot be reclaimed this way.
