@@ -119,6 +119,12 @@ type Memberlist struct {
 
 	broadcasts *TransmitLimitedQueue
 
+	// packetBufferSize is the effective packet budget for building
+	// outgoing packets: Config.UDPBufferSize constrained by the
+	// transport's advertised MaxPacketSize (which stands alone when
+	// UDPBufferSize is unset). Zero or negative means no packet budget.
+	packetBufferSize int
+
 	logger *log.Logger
 
 	// metricLabels is the slice of labels to put on all emitted metrics
@@ -266,6 +272,18 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 	}
 	m.broadcasts.NumNodes = func() int {
 		return m.estNumNodes()
+	}
+
+	// Resolve the effective packet budget once: the transport is fixed
+	// after construction, and every packet-building path must respect its
+	// advertised limit, not just Config.UDPBufferSize.
+	m.packetBufferSize = conf.UDPBufferSize
+	if size, ok := maxPacketSizeOf(m.transport); ok {
+		if m.packetBufferSize <= 0 {
+			m.packetBufferSize = size
+		} else {
+			m.packetBufferSize = min(m.packetBufferSize, size)
+		}
 	}
 
 	// Fail fast if a full-size alive message could never fit the transport
@@ -578,11 +596,35 @@ func (m *Memberlist) delegateMeta() ([]byte, error) {
 	return meta, nil
 }
 
+// crcOverhead is the hasCrcMsg header rawSendMsgPacket prepends for
+// protocol-v5 peers: 1 type byte + 4 CRC bytes.
+const crcOverhead = 5
+
 // validateMetaMaxSize checks at construction time that a worst-case alive
 // message — IPv6 address, max port/incarnation, meta at the configured
-// cap — fits the transport packet budget.
+// cap — fits the transport packet budget with the full send envelope
+// (gossip compound framing, CRC, label, encryption) reserved.
 func (m *Memberlist) validateMetaMaxSize() error {
 	limit := m.metaMaxSize()
+
+	budget := m.packetBufferSize
+	if budget <= 0 {
+		// No packet budget configured and none advertised: nothing to
+		// validate against (degenerate, stream-only style setups).
+		return nil
+	}
+	budget -= compoundHeaderOverhead + compoundOverhead + crcOverhead
+	budget -= labelOverhead(m.config.Label)
+	if m.config.EncryptionEnabled() {
+		budget -= encryptOverhead(m.encryptionVersion())
+	}
+
+	// The encoded message is at least as large as the raw meta: reject
+	// absurd caps before materializing a slice of that size.
+	if limit > budget {
+		return fmt.Errorf("memberlist: MetaMaxSize %d exceeds the %d-byte transport packet budget (UDPBufferSize or the transport's MaxPacketSize, minus gossip framing, CRC, label and encryption overhead)",
+			limit, budget)
+	}
 
 	a := alive{
 		Incarnation: math.MaxUint32,
@@ -596,28 +638,8 @@ func (m *Memberlist) validateMetaMaxSize() error {
 	if err != nil {
 		return fmt.Errorf("memberlist: could not size a full alive message: %w", err)
 	}
-	msgSize := buf.Len()
-
-	budget := m.config.UDPBufferSize
-	if size, ok := maxPacketSizeOf(m.transport); ok {
-		if budget <= 0 {
-			budget = size
-		} else {
-			budget = min(budget, size)
-		}
-	}
-	if budget <= 0 {
-		// No packet budget configured and none advertised: nothing to
-		// validate against (degenerate, stream-only style setups).
-		return nil
-	}
-	budget -= labelOverhead(m.config.Label)
-	if m.config.EncryptionEnabled() {
-		budget -= encryptOverhead(m.encryptionVersion())
-	}
-
-	if msgSize > budget {
-		return fmt.Errorf("memberlist: MetaMaxSize %d does not fit the transport packet budget: a full-size alive message is %d bytes but only %d are available (UDPBufferSize or the transport's MaxPacketSize, minus label and encryption overhead)",
+	if msgSize := buf.Len(); msgSize > budget {
+		return fmt.Errorf("memberlist: MetaMaxSize %d does not fit the transport packet budget: a full-size alive message is %d bytes but only %d are available (UDPBufferSize or the transport's MaxPacketSize, minus gossip framing, CRC, label and encryption overhead)",
 			limit, msgSize, budget)
 	}
 	return nil

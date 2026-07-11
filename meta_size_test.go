@@ -81,6 +81,22 @@ func TestCreate_MetaMaxSizeExceedsTransportBudget(t *testing.T) {
 	require.Contains(t, err.Error(), "MetaMaxSize")
 }
 
+func TestCreate_AbsurdMetaMaxSize_FailsWithoutAllocating(t *testing.T) {
+	c := testConfig(t)
+	// An absurd cap must be rejected by comparing against the budget
+	// before materializing any slice of that size — a clean error, not an
+	// OOM or makeslice panic.
+	c.MetaMaxSize = 1 << 40
+
+	m, err := Create(c)
+	if m != nil {
+		defer func() { _ = m.Shutdown() }()
+	}
+	require.Error(t, err)
+	require.Nil(t, m)
+	require.Contains(t, err.Error(), "MetaMaxSize")
+}
+
 // smallPacketTransport advertises a tiny MaxPacketSize.
 type smallPacketTransport struct {
 	*blockingTransport
