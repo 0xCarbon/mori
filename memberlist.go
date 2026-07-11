@@ -102,8 +102,13 @@ type Memberlist struct {
 	lowPriorityMsgQueue  *list.List
 	msgQueueLock         sync.Mutex
 
-	nodeLock   sync.RWMutex
-	lockq      lockNodesQueue        // ctx-bounded nodeLock acquisition queue
+	nodeLock sync.RWMutex
+	lockq    lockNodesQueue // ctx-bounded nodeLock acquisition queue
+	// mergeLock serializes verifyProtocol+mergeState in mergeRemoteState
+	// so concurrent exchanges cannot admit mutually incompatible states
+	// past the compatibility guard. Ordering: mergeLock before nodeLock
+	// (mergeState acquires nodeLock per node while mergeLock is held).
+	mergeLock  sync.Mutex
 	nodes      []*nodeState          // Known nodes
 	nodeMap    map[string]*nodeState // Maps Node.Name -> NodeState
 	nodeTimers map[string]*suspicion // Maps Node.Name -> suspicion timer
