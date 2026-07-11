@@ -101,6 +101,39 @@ type NodeAwareTransport interface {
 	DialAddressTimeout(addr Address, timeout time.Duration) (net.Conn, error)
 }
 
+// MaxPacketSizeTransport is an optional interface a Transport can implement
+// to advertise the largest packet payload, in bytes, it can deliver in one
+// WriteTo. When present, Create validates Config.MetaMaxSize against it (in
+// addition to UDPBufferSize) so a full-size alive message is never silently
+// undeliverable.
+type MaxPacketSizeTransport interface {
+	MaxPacketSize() int
+}
+
+// maxPacketSizeOf reports the packet-size limit advertised by t, unwrapping
+// the internal shim and label wrappers that would otherwise hide the
+// optional interface of the underlying transport.
+func maxPacketSizeOf(t Transport) (int, bool) {
+	for {
+		if mp, ok := t.(MaxPacketSizeTransport); ok {
+			// A non-positive advertised size is treated as not advertised
+			// rather than silently collapsing the packet budget.
+			if size := mp.MaxPacketSize(); size > 0 {
+				return size, true
+			}
+			return 0, false
+		}
+		switch w := t.(type) {
+		case *shimNodeAwareTransport:
+			t = w.Transport
+		case *labelWrappedTransport:
+			t = w.NodeAwareTransport
+		default:
+			return 0, false
+		}
+	}
+}
+
 type shimNodeAwareTransport struct {
 	Transport
 }

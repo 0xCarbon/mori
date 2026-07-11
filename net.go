@@ -797,7 +797,9 @@ func (m *Memberlist) encodeAndSendMsg(a Address, msgType messageType, msg any) e
 // opportunistically create a compoundMsg and piggy back other broadcasts.
 func (m *Memberlist) sendMsg(a Address, msg []byte) error {
 	// Check if we can piggy back any messages
-	bytesAvail := m.config.UDPBufferSize - len(msg) - compoundHeaderOverhead - labelOverhead(m.config.Label)
+	// Reserve the primary message's own compound part length and the CRC
+	// header rawSendMsgPacket may append after budgeting.
+	bytesAvail := m.packetBufferSize - len(msg) - compoundHeaderOverhead - compoundOverhead - crcOverhead - labelOverhead(m.config.Label)
 	if m.config.EncryptionEnabled() && m.config.GossipVerifyOutgoing {
 		bytesAvail -= encryptOverhead(m.encryptionVersion())
 	}

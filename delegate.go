@@ -8,8 +8,10 @@ package mori
 // as they can and generally will be called concurrently.
 type Delegate interface {
 	// NodeMeta is used to retrieve meta-data about the current node
-	// when broadcasting an alive message. It's length is limited to
-	// the given byte size. This metadata is available in the Node structure.
+	// when broadcasting an alive message. Its length is limited to the
+	// given byte size (Config.MetaMaxSize, or the MetaMaxSize default of
+	// 512 bytes when unset); exceeding it makes the lifecycle call return
+	// ErrMetaTooLarge. This metadata is available in the Node structure.
 	NodeMeta(limit int) []byte
 
 	// NotifyMsg is called when a user-data message is received.
