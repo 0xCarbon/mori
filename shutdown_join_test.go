@@ -281,6 +281,88 @@ func TestShutdown_FromUntrackedCallbackHoldingNodeLock(t *testing.T) {
 	}
 }
 
+// TestShutdown_ReentrantFirst_QuiescesAsynchronously: when the FIRST (and
+// only) Shutdown call happens inside a delegate callback, the reaper alone
+// must drive the instance to quiescence — no second Shutdown call allowed.
+func TestShutdown_ReentrantFirst_QuiescesAsynchronously(t *testing.T) {
+	d := &shutdownOnLeaveDelegate{done: make(chan error, 1)}
+
+	m := GetMemberlist(t, func(c *Config) { c.Events = d })
+	require.NoError(t, m.setAlive())
+	d.m = m
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = m.LeaveContext(ctx) // NotifyLeave calls Shutdown re-entrantly
+
+	select {
+	case err := <-d.done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-callback Shutdown did not return")
+	}
+
+	// No further Shutdown calls: the reaper must drain every tracked
+	// goroutine and clear the suspicion timers on its own.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		m.trackedMu.Lock()
+		tracked := len(m.trackedGoids)
+		m.trackedMu.Unlock()
+		if tracked == 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	m.trackedMu.Lock()
+	tracked := len(m.trackedGoids)
+	m.trackedMu.Unlock()
+	require.Zero(t, tracked, "reaper did not quiesce the instance after re-entrant-first Shutdown")
+
+	m.nodeLock.RLock()
+	timers := len(m.nodeTimers)
+	m.nodeLock.RUnlock()
+	require.Zero(t, timers, "reaper did not clear suspicion timers")
+}
+
+// panicRecoverDelegate panics on NotifyUpdate; the caller recovers. Used to
+// prove a panicking callback does not leak the callback-context marker.
+type panicRecoverDelegate struct{}
+
+func (panicRecoverDelegate) NotifyJoin(*Node)   {}
+func (panicRecoverDelegate) NotifyLeave(*Node)  {}
+func (panicRecoverDelegate) NotifyUpdate(*Node) { panic("boom") }
+
+// TestShutdown_AfterRecoveredCallbackPanic_JoinsSynchronously: a delegate
+// panic that the application recovers must not leave the goroutine marked
+// as callback context — a later Shutdown on it must join synchronously.
+func TestShutdown_AfterRecoveredCallbackPanic_JoinsSynchronously(t *testing.T) {
+	d := &MockDelegate{}
+	d.setMeta([]byte("v1"))
+
+	m := GetMemberlist(t, func(c *Config) {
+		c.Delegate = d
+		c.Events = panicRecoverDelegate{}
+	})
+	require.NoError(t, m.setAlive())
+
+	// Trigger NotifyUpdate (meta change) which panics; recover here.
+	d.setMeta([]byte("v2"))
+	require.Panics(t, func() { _ = m.UpdateNodeContext(context.Background()) })
+
+	// The marker must have been released by the deferred unmark.
+	require.False(t, m.inReentrantContext(),
+		"recovered callback panic leaked the callback-context marker")
+
+	// And Shutdown on this goroutine must take the synchronous path: after
+	// it returns, every tracked goroutine is already gone.
+	require.NoError(t, m.Shutdown())
+	m.trackedMu.Lock()
+	tracked := len(m.trackedGoids)
+	m.trackedMu.Unlock()
+	require.Zero(t, tracked, "synchronous Shutdown returned before quiescence")
+}
+
 // TestShutdown_ConcurrentFromTrackedGoroutine: a tracked goroutine calling
 // Shutdown while a normal Shutdown is mid-join must not deadlock on
 // shutdownLock (the outer join waits for the tracked goroutine, which used

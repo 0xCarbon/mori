@@ -395,9 +395,7 @@ func (m *Memberlist) probeNode(node *nodeState) {
 		if v.Complete {
 			if m.config.Ping != nil {
 				rtt := v.Timestamp.Sub(sent)
-				exit := m.enterCallback()
-				m.config.Ping.NotifyPingComplete(&node.Node, rtt, v.Payload)
-				exit()
+				m.runCallback(func() { m.config.Ping.NotifyPingComplete(&node.Node, rtt, v.Payload) })
 			}
 			return
 		}
@@ -994,9 +992,8 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 			DMax: a.Vsn[4],
 			DCur: a.Vsn[5],
 		}
-		exit := m.enterCallback()
-		err := m.config.Alive.NotifyAlive(node)
-		exit()
+		var err error
+		m.runCallback(func() { err = m.config.Alive.NotifyAlive(node) })
 		if err != nil {
 			m.logger.Printf("[WARN] memberlist: ignoring alive message for '%s': %s",
 				a.Node, err)
@@ -1076,9 +1073,7 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 						Port: a.Port,
 						Meta: a.Meta,
 					}
-					exit := m.enterCallback()
-					m.config.Conflict.NotifyConflict(&state.Node, &other)
-					exit()
+					m.runCallback(func() { m.config.Conflict.NotifyConflict(&state.Node, &other) })
 				}
 				return
 			}
@@ -1158,16 +1153,16 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 
 	// Notify the delegate of any relevant updates
 	if m.config.Events != nil {
-		exit := m.enterCallback()
-		if oldState == StateDead || oldState == StateLeft {
-			// if Dead/Left -> Alive, notify of join
-			m.config.Events.NotifyJoin(&state.Node)
+		m.runCallback(func() {
+			if oldState == StateDead || oldState == StateLeft {
+				// if Dead/Left -> Alive, notify of join
+				m.config.Events.NotifyJoin(&state.Node)
 
-		} else if !bytes.Equal(oldMeta, state.Meta) {
-			// if Meta changed, trigger an update notification
-			m.config.Events.NotifyUpdate(&state.Node)
-		}
-		exit()
+			} else if !bytes.Equal(oldMeta, state.Meta) {
+				// if Meta changed, trigger an update notification
+				m.config.Events.NotifyUpdate(&state.Node)
+			}
+		})
 	}
 }
 
@@ -1342,9 +1337,7 @@ func (m *Memberlist) deadNodeLocked(d *dead) {
 
 	// Notify of death
 	if m.config.Events != nil {
-		exit := m.enterCallback()
-		m.config.Events.NotifyLeave(&state.Node)
-		exit()
+		m.runCallback(func() { m.config.Events.NotifyLeave(&state.Node) })
 	}
 }
 

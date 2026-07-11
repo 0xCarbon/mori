@@ -549,9 +549,8 @@ func (m *Memberlist) delegateMeta() ([]byte, error) {
 	if m.config.Delegate == nil {
 		return nil, nil
 	}
-	exit := m.enterCallback()
-	meta := m.config.Delegate.NodeMeta(MetaMaxSize)
-	exit()
+	var meta []byte
+	m.runCallback(func() { meta = m.config.Delegate.NodeMeta(MetaMaxSize) })
 	if len(meta) > MetaMaxSize {
 		return nil, fmt.Errorf("%w: %d bytes > %d-byte limit", ErrMetaTooLarge, len(meta), MetaMaxSize)
 	}
@@ -967,23 +966,24 @@ func (m *Memberlist) goBackground(fn func()) {
 	})
 }
 
-// enterCallback marks the current goroutine as running a delegate callback
-// and returns the corresponding exit function. Every delegate invocation
-// site wraps the call with this pair so a re-entrant Shutdown from user
-// code — which may hold nodeLock or run on a joined goroutine — can be
-// detected.
-func (m *Memberlist) enterCallback() (exit func()) {
+// runCallback runs a delegate callback with the current goroutine marked
+// as callback context, so a re-entrant Shutdown from user code — which may
+// hold nodeLock or run on a joined goroutine — is detected. The unmark is
+// deferred: a panicking callback must not leak the marker (the panic
+// propagates).
+func (m *Memberlist) runCallback(fn func()) {
 	id := goid()
 	m.trackedMu.Lock()
 	m.callbackGoids[id]++
 	m.trackedMu.Unlock()
-	return func() {
+	defer func() {
 		m.trackedMu.Lock()
 		if m.callbackGoids[id]--; m.callbackGoids[id] <= 0 {
 			delete(m.callbackGoids, id)
 		}
 		m.trackedMu.Unlock()
-	}
+	}()
+	fn()
 }
 
 // inReentrantContext reports whether the caller runs on a goroutine that
