@@ -619,6 +619,10 @@ func (m *Memberlist) validateMetaMaxSize() error {
 	budget = min(budget, math.MaxUint16)
 	budget -= compoundHeaderOverhead + compoundOverhead + crcOverhead
 	budget -= labelOverhead(m.config.Label)
+	// Deliberately reserved whenever encryption is enabled, even during
+	// an upshift migration with GossipVerifyOutgoing=false (plaintext on
+	// the wire): the migration ends with encrypted sends, and a cap that
+	// only fits unencrypted would defer the failure to that flip.
 	if m.config.EncryptionEnabled() {
 		budget -= encryptOverhead(m.encryptionVersion())
 	}
