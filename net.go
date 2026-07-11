@@ -1282,39 +1282,55 @@ func (m *Memberlist) readRemoteState(bufConn io.Reader, dec *codec.Decoder) (boo
 
 // mergeRemoteState is used to merge the remote state with our local state
 func (m *Memberlist) mergeRemoteState(join bool, remoteNodes []pushNodeState, userBuf []byte) error {
-	if err := m.verifyProtocol(remoteNodes); err != nil {
+	// Serialize protocol verification with the state merge: two concurrent
+	// exchanges (parallel push/pull initiations, or concurrent inbound
+	// handlers) whose states are individually compatible but mutually
+	// incompatible could otherwise both pass verifyProtocol before either
+	// merges, admitting a mixed-protocol membership the sequential order
+	// would reject. Only the network I/O of an exchange stays parallel.
+	err := func() error {
+		m.mergeLock.Lock()
+		defer m.mergeLock.Unlock()
+
+		if err := m.verifyProtocol(remoteNodes); err != nil {
+			return err
+		}
+
+		// Invoke the merge delegate if any
+		if join && m.config.Merge != nil {
+			nodes := make([]*Node, len(remoteNodes))
+			for idx, n := range remoteNodes {
+				nodes[idx] = &Node{
+					Name:  n.Name,
+					Addr:  n.Addr,
+					Port:  n.Port,
+					Meta:  n.Meta,
+					State: n.State,
+					PMin:  n.Vsn[0],
+					PMax:  n.Vsn[1],
+					PCur:  n.Vsn[2],
+					DMin:  n.Vsn[3],
+					DMax:  n.Vsn[4],
+					DCur:  n.Vsn[5],
+				}
+			}
+			var err error
+			m.runCallback(func() { err = m.config.Merge.NotifyMerge(nodes) })
+			if err != nil {
+				return err
+			}
+		}
+
+		// Merge the membership state
+		m.mergeState(remoteNodes)
+		return nil
+	}()
+	if err != nil {
 		return err
 	}
 
-	// Invoke the merge delegate if any
-	if join && m.config.Merge != nil {
-		nodes := make([]*Node, len(remoteNodes))
-		for idx, n := range remoteNodes {
-			nodes[idx] = &Node{
-				Name:  n.Name,
-				Addr:  n.Addr,
-				Port:  n.Port,
-				Meta:  n.Meta,
-				State: n.State,
-				PMin:  n.Vsn[0],
-				PMax:  n.Vsn[1],
-				PCur:  n.Vsn[2],
-				DMin:  n.Vsn[3],
-				DMax:  n.Vsn[4],
-				DCur:  n.Vsn[5],
-			}
-		}
-		var err error
-		m.runCallback(func() { err = m.config.Merge.NotifyMerge(nodes) })
-		if err != nil {
-			return err
-		}
-	}
-
-	// Merge the membership state
-	m.mergeState(remoteNodes)
-
-	// Invoke the delegate for user state
+	// Invoke the delegate for user state — outside the membership
+	// invariant; the app serializes its own state if it needs to.
 	if userBuf != nil && m.config.Delegate != nil {
 		m.runCallback(func() { m.config.Delegate.MergeRemoteState(userBuf, join) })
 	}
