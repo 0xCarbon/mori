@@ -5,6 +5,7 @@ package mori
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -617,7 +618,9 @@ func TestMemberList_ResolveAddr_TCP_First(t *testing.T) {
 		c.DNSConfigPath = tmpFile.Name()
 	})
 	defer func() {
-		if err := m.setAlive(nil); err != nil {
+		// LIFO: this runs after the deferred Shutdown below, and setAlive
+		// on a shut-down instance returns ErrShutdown by design.
+		if err := m.setAlive(nil); err != nil && !errors.Is(err, ErrShutdown) {
 			t.Fatal(err)
 		}
 	}()

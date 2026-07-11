@@ -575,6 +575,10 @@ func (m *Memberlist) setAlive(receipt *eventReceipt) error {
 		Vsn:         m.config.BuildVsnArray(),
 	}
 	m.nodeLock.Lock()
+	if m.hasShutdown() {
+		m.nodeLock.Unlock()
+		return ErrShutdown
+	}
 	m.aliveNodeLocked(&a, nil, true, receipt)
 	m.nodeLock.Unlock()
 

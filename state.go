@@ -962,6 +962,12 @@ func (m *Memberlist) refute(me *nodeState, accusedInc uint32) {
 func (m *Memberlist) aliveNode(a *alive, bootstrap bool) {
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
+	// Producer fence: the shutdown decision is taken once, at critical-
+	// section entry. A section that passes commits atomically — its event
+	// lands before finishShutdown's seal, which needs this lock.
+	if m.hasShutdown() {
+		return
+	}
 	m.aliveNodeLocked(a, nil, bootstrap, nil)
 }
 
@@ -969,12 +975,11 @@ func (m *Memberlist) aliveNode(a *alive, bootstrap bool) {
 // write lock. receipt, when non-nil, is attached to the membership event
 // this mutation emits (if any); the caller checks receipt.attached to know
 // whether there is a delivery to wait for.
+// The shutdown decision belongs to the caller's critical-section entry
+// (wrappers and lifecycle calls check hasShutdown under nodeLock once);
+// re-checking here would let the un-locked flag flip mid-commit and
+// silently split an already-decided mutation.
 func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap bool, receipt *eventReceipt) {
-	// Producer fence: no mutation or event admission on a shut-down
-	// instance (finishShutdown seals the queue under this same lock).
-	if m.hasShutdown() {
-		return
-	}
 	state, ok := m.nodeMap[a.Node]
 
 	// It is possible that during a Leave(), there is already an aliveMsg
@@ -1304,17 +1309,19 @@ func (m *Memberlist) suspectNode(s *suspect) {
 func (m *Memberlist) deadNode(d *dead) {
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
+	// Producer fence — see aliveNode.
+	if m.hasShutdown() {
+		return
+	}
 	m.deadNodeLocked(d, nil)
 }
 
 // deadNodeLocked is deadNode for callers that already hold the nodeLock
 // write lock. receipt, when non-nil, is attached to the leave event this
 // mutation emits (if any).
+// The shutdown decision belongs to the caller's critical-section entry —
+// see aliveNodeLocked.
 func (m *Memberlist) deadNodeLocked(d *dead, receipt *eventReceipt) {
-	// Producer fence — see aliveNodeLocked.
-	if m.hasShutdown() {
-		return
-	}
 	state, ok := m.nodeMap[d.Node]
 
 	// If we've never heard about this node before, ignore it
