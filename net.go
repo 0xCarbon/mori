@@ -1282,12 +1282,45 @@ func (m *Memberlist) readRemoteState(bufConn io.Reader, dec *codec.Decoder) (boo
 
 // mergeRemoteState is used to merge the remote state with our local state
 func (m *Memberlist) mergeRemoteState(join bool, remoteNodes []pushNodeState, userBuf []byte) error {
+	// Advisory early check so the merge delegate never sees a
+	// protocol-invalid state; re-verified under mergeLock below.
+	if err := m.verifyProtocol(remoteNodes); err != nil {
+		return err
+	}
+
+	// Invoke the merge delegate if any — outside mergeLock: a delegate may
+	// re-enter (e.g. call Join synchronously), which reaches this function
+	// again and would self-deadlock on a held lock.
+	if join && m.config.Merge != nil {
+		nodes := make([]*Node, len(remoteNodes))
+		for idx, n := range remoteNodes {
+			nodes[idx] = &Node{
+				Name:  n.Name,
+				Addr:  n.Addr,
+				Port:  n.Port,
+				Meta:  n.Meta,
+				State: n.State,
+				PMin:  n.Vsn[0],
+				PMax:  n.Vsn[1],
+				PCur:  n.Vsn[2],
+				DMin:  n.Vsn[3],
+				DMax:  n.Vsn[4],
+				DCur:  n.Vsn[5],
+			}
+		}
+		var err error
+		m.runCallback(func() { err = m.config.Merge.NotifyMerge(nodes) })
+		if err != nil {
+			return err
+		}
+	}
+
 	// Serialize protocol verification with the state merge: two concurrent
 	// exchanges (parallel push/pull initiations, or concurrent inbound
 	// handlers) whose states are individually compatible but mutually
 	// incompatible could otherwise both pass verifyProtocol before either
 	// merges, admitting a mixed-protocol membership the sequential order
-	// would reject. Only the network I/O of an exchange stays parallel.
+	// would reject. Only network I/O and delegate callbacks stay parallel.
 	err := func() error {
 		m.mergeLock.Lock()
 		defer m.mergeLock.Unlock()
@@ -1295,33 +1328,6 @@ func (m *Memberlist) mergeRemoteState(join bool, remoteNodes []pushNodeState, us
 		if err := m.verifyProtocol(remoteNodes); err != nil {
 			return err
 		}
-
-		// Invoke the merge delegate if any
-		if join && m.config.Merge != nil {
-			nodes := make([]*Node, len(remoteNodes))
-			for idx, n := range remoteNodes {
-				nodes[idx] = &Node{
-					Name:  n.Name,
-					Addr:  n.Addr,
-					Port:  n.Port,
-					Meta:  n.Meta,
-					State: n.State,
-					PMin:  n.Vsn[0],
-					PMax:  n.Vsn[1],
-					PCur:  n.Vsn[2],
-					DMin:  n.Vsn[3],
-					DMax:  n.Vsn[4],
-					DCur:  n.Vsn[5],
-				}
-			}
-			var err error
-			m.runCallback(func() { err = m.config.Merge.NotifyMerge(nodes) })
-			if err != nil {
-				return err
-			}
-		}
-
-		// Merge the membership state
 		m.mergeState(remoteNodes)
 		return nil
 	}()
