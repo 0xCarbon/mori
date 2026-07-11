@@ -613,6 +613,10 @@ func (m *Memberlist) validateMetaMaxSize() error {
 		// validate against (degenerate, stream-only style setups).
 		return nil
 	}
+	// Protocol ceiling: compound framing encodes each part length as a
+	// uint16, and a UDP payload cannot exceed ~65507 bytes — no packet
+	// budget above that is deliverable regardless of configuration.
+	budget = min(budget, math.MaxUint16)
 	budget -= compoundHeaderOverhead + compoundOverhead + crcOverhead
 	budget -= labelOverhead(m.config.Label)
 	if m.config.EncryptionEnabled() {

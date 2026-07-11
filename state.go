@@ -613,7 +613,8 @@ func (m *Memberlist) gossip() {
 	m.nodeLock.RUnlock()
 
 	// Compute the bytes available
-	bytesAvail := m.packetBufferSize - compoundHeaderOverhead - labelOverhead(m.config.Label)
+	// crcOverhead: rawSendMsgPacket may append a CRC header after budgeting.
+	bytesAvail := m.packetBufferSize - compoundHeaderOverhead - crcOverhead - labelOverhead(m.config.Label)
 	if m.config.EncryptionEnabled() {
 		bytesAvail -= encryptOverhead(m.encryptionVersion())
 	}

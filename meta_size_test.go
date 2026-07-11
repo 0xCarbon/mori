@@ -1,6 +1,7 @@
 package mori
 
 import (
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -85,8 +86,8 @@ func TestCreate_AbsurdMetaMaxSize_FailsWithoutAllocating(t *testing.T) {
 	c := testConfig(t)
 	// An absurd cap must be rejected by comparing against the budget
 	// before materializing any slice of that size — a clean error, not an
-	// OOM or makeslice panic.
-	c.MetaMaxSize = 1 << 40
+	// OOM or makeslice panic. math.MaxInt stays in range on 32-bit too.
+	c.MetaMaxSize = math.MaxInt
 
 	m, err := Create(c)
 	if m != nil {
