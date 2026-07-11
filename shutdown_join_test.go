@@ -287,9 +287,32 @@ func TestShutdown_FromUntrackedCallbackHoldingNodeLock(t *testing.T) {
 func TestShutdown_ReentrantFirst_QuiescesAsynchronously(t *testing.T) {
 	d := &shutdownOnLeaveDelegate{done: make(chan error, 1)}
 
-	m := GetMemberlist(t, func(c *Config) { c.Events = d })
+	m := GetMemberlist(t, func(c *Config) {
+		c.Events = d
+		// Suspicion window far beyond the test: only finishShutdown can
+		// clear the timer armed below.
+		c.ProbeInterval = time.Second
+	})
 	require.NoError(t, m.setAlive())
 	d.m = m
+
+	// Arm a suspicion timer for a peer: tracked goroutines self-remove on
+	// exit, so this timer is the observable that ONLY the reaper's
+	// finishShutdown clears.
+	peer := alive{
+		Incarnation: 1,
+		Node:        "peer",
+		Addr:        []byte{127, 0, 0, 2},
+		Port:        7946,
+		Vsn:         m.config.BuildVsnArray(),
+	}
+	m.aliveNode(&peer, false)
+	m.suspectNode(&suspect{Incarnation: 1, Node: "peer", From: m.config.Name})
+
+	m.nodeLock.RLock()
+	armed := len(m.nodeTimers)
+	m.nodeLock.RUnlock()
+	require.Equal(t, 1, armed, "suspicion timer must be armed before the leave")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -302,27 +325,25 @@ func TestShutdown_ReentrantFirst_QuiescesAsynchronously(t *testing.T) {
 		t.Fatal("in-callback Shutdown did not return")
 	}
 
-	// No further Shutdown calls: the reaper must drain every tracked
-	// goroutine and clear the suspicion timers on its own.
+	// No further Shutdown calls: the reaper alone must drain the tracked
+	// goroutines and clear the suspicion timer.
 	deadline := time.Now().Add(5 * time.Second)
+	timers := -1
 	for time.Now().Before(deadline) {
-		m.trackedMu.Lock()
-		tracked := len(m.trackedGoids)
-		m.trackedMu.Unlock()
-		if tracked == 0 {
+		m.nodeLock.RLock()
+		timers = len(m.nodeTimers)
+		m.nodeLock.RUnlock()
+		if timers == 0 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	require.Zero(t, timers, "reaper did not clear suspicion timers after re-entrant-first Shutdown")
+
 	m.trackedMu.Lock()
 	tracked := len(m.trackedGoids)
 	m.trackedMu.Unlock()
-	require.Zero(t, tracked, "reaper did not quiesce the instance after re-entrant-first Shutdown")
-
-	m.nodeLock.RLock()
-	timers := len(m.nodeTimers)
-	m.nodeLock.RUnlock()
-	require.Zero(t, timers, "reaper did not clear suspicion timers")
+	require.Zero(t, tracked, "tracked goroutines survived quiescence")
 }
 
 // panicRecoverDelegate panics on NotifyUpdate; the caller recovers. Used to
