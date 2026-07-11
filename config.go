@@ -251,7 +251,11 @@ type Config struct {
 	// Rolling upgrades: the cap applies only when producing the local
 	// node's meta — the receive path accepts whatever peers gossip. A
 	// cluster can therefore be upgraded node by node before raising the
-	// knob anywhere.
+	// knob anywhere. Note the fail-fast validation covers the local
+	// node's own alive message only: a peer with a longer name or a
+	// higher cap can still produce messages that exceed this node's
+	// packet budget when re-gossiped, so keep packet budgets uniform
+	// across the cluster.
 	MetaMaxSize int
 
 	// DeadNodeReclaimTime controls the time before a dead node's name can be

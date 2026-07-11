@@ -116,7 +116,12 @@ type MaxPacketSizeTransport interface {
 func maxPacketSizeOf(t Transport) (int, bool) {
 	for {
 		if mp, ok := t.(MaxPacketSizeTransport); ok {
-			return mp.MaxPacketSize(), true
+			// A non-positive advertised size is treated as not advertised
+			// rather than silently collapsing the packet budget.
+			if size := mp.MaxPacketSize(); size > 0 {
+				return size, true
+			}
+			return 0, false
 		}
 		switch w := t.(type) {
 		case *shimNodeAwareTransport:
