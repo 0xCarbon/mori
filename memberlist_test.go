@@ -2446,3 +2446,43 @@ func runStep(t *testing.T, name string, fn func(t *testing.T)) {
 		t.FailNow()
 	}
 }
+
+// Regression: Members() and LocalNode() must return snapshot copies, not
+// pointers into Memberlist-internal state. Handing out live *Node aliases
+// lets callers read Node.Meta (and Addr/Incarnation/...) while alive/update
+// handling mutates the same memory under nodeLock — a data race caught by
+// the race detector (originally surfaced by taba's Cluster.Meta reading
+// Members()[i].Meta concurrently with UpdateNode).
+func TestMemberlist_Members_SnapshotNoRace(t *testing.T) {
+	d := &MockDelegate{}
+	d.setMeta([]byte{0})
+
+	c := testConfig(t)
+	c.Delegate = d
+	m, err := Create(c)
+	require.NoError(t, err)
+	defer func() { _ = m.Shutdown() }()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for _, n := range m.Members() {
+				_ = append([]byte(nil), n.Meta...) // read Meta contents
+			}
+			_ = append([]byte(nil), m.LocalNode().Meta...)
+		}
+	})
+
+	for i := range 100 {
+		d.setMeta([]byte{byte(i)})
+		require.NoError(t, m.UpdateNode(time.Second))
+	}
+	close(stop)
+	wg.Wait()
+}
