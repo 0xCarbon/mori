@@ -6,6 +6,13 @@
 
 ### Fixed
 
+* `(*Memberlist).Members` and `(*Memberlist).LocalNode` now return snapshot
+  copies of `Node` taken under the node lock, instead of pointers into
+  live Memberlist-internal state. Callers reading returned fields (`Meta`,
+  `Addr`, ...) no longer data race with concurrent alive/update handling;
+  slice-typed fields alias buffers that are replaced wholesale, never
+  mutated in place, so the copies are safe to read lock-free.
+
 ### Security
 
 ## v0.7.0 (Mori)

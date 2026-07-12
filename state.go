@@ -1170,7 +1170,12 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 			state.DCur = a.Vsn[5]
 		}
 
-		// Update the state and incarnation number
+		// Update the state and incarnation number.
+		//
+		// INVARIANT: Meta and Addr must be replaced wholesale (slice-header
+		// assignment from a freshly-allocated buffer), never mutated in
+		// place. Members()/LocalNode() return shallow Node copies that alias
+		// these buffers and read them lock-free after this write.
 		state.Incarnation = a.Incarnation
 		state.Meta = a.Meta
 		state.Addr = a.Addr

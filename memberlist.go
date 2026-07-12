@@ -608,12 +608,19 @@ func (m *Memberlist) refreshAdvertise() (net.IP, int, error) {
 	return addr, port, nil
 }
 
-// LocalNode is used to return the local Node
+// LocalNode is used to return the local Node.
+//
+// The returned Node is a snapshot copy taken under the node lock — it does
+// not alias Memberlist-internal state, so callers may read it at any time
+// without racing against concurrent membership updates. Slice-typed fields
+// (Meta, Addr) alias buffers that are replaced wholesale on update, never
+// mutated in place, so they are safe to read as well.
 func (m *Memberlist) LocalNode() *Node {
 	m.nodeLock.RLock()
 	defer m.nodeLock.RUnlock()
 	state := m.nodeMap[m.config.Name]
-	return &state.Node
+	node := state.Node
+	return &node
 }
 
 // metaMaxSize returns the effective producer-side cap on node meta data:
@@ -950,9 +957,10 @@ func (m *Memberlist) SendReliable(to *Node, msg []byte) error {
 	return m.sendUserMsg(to.FullAddress(), msg)
 }
 
-// Members returns a list of all known live nodes. The node structures
-// returned must not be modified. If you wish to modify a Node, make a
-// copy first.
+// Members returns a point-in-time snapshot of all known live nodes. The
+// returned Node structures are copies taken under the node lock — they do
+// not alias Memberlist-internal state, so callers may keep and read them
+// at any time without racing against concurrent membership updates.
 func (m *Memberlist) Members() []*Node {
 	m.nodeLock.RLock()
 	defer m.nodeLock.RUnlock()
@@ -960,7 +968,14 @@ func (m *Memberlist) Members() []*Node {
 	nodes := make([]*Node, 0, len(m.nodes))
 	for _, n := range m.nodes {
 		if !n.DeadOrLeft() {
-			nodes = append(nodes, &n.Node)
+			// Snapshot copy: handing out &n.Node would alias state that is
+			// mutated under nodeLock (Meta, Addr, Incarnation, ...) — any
+			// caller reading it after this method returns would data race
+			// with concurrent alive/update handling. Slice-typed fields
+			// alias buffers that are replaced wholesale, never mutated in
+			// place, so the copies are safe to read lock-free.
+			node := n.Node
+			nodes = append(nodes, &node)
 		}
 	}
 
