@@ -1074,6 +1074,118 @@ func TestReadRemoteState_Limits(t *testing.T) {
 	})
 }
 
+func TestReadUserMsg_Limit(t *testing.T) {
+
+	mockNet := &MockNetwork{}
+	tr := mockNet.NewTransport("node")
+	logs := &bytes.Buffer{}
+	logger := log.New(logs, "", 0)
+
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Logger = logger
+		c.Transport = tr
+		c.BindAddr = "127.0.0.1"
+		c.BindPort = 1
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	addr := joinHostPort(m.config.BindAddr, uint16(m.config.BindPort))
+
+	msg := userMsgHeader{UserMsgLen: 30_000_000}
+	buf, err := encode(userMsg, msg, m.config.MsgpackUseNewTimeFormat)
+	require.NoError(t, err)
+
+	conn, err := tr.DialTimeout(addr, time.Millisecond*100)
+	require.NoError(t, err)
+
+	err = m.rawSendMsgStream(conn, buf.Bytes(), "")
+	require.NoError(t, err)
+
+	// conn closed: get nothing back
+	var out []byte
+	_, err = conn.Read(out)
+	require.ErrorContains(t, err, "EOF")
+	require.Contains(t, logs.String(),
+		"user message length (30000000) exceeds limit")
+}
+
+type captureMergeDelegate struct {
+	nodes []*Node
+}
+
+func (c *captureMergeDelegate) NotifyMerge(peers []*Node) error {
+	c.nodes = peers
+	return fmt.Errorf("merge canceled by test")
+}
+
+// TestMergeRemoteState_ShortVsn guards the merge delegate path: short Vsn
+// slices from the wire must reach the delegate without protocol versions
+// instead of panicking on the short slice.
+func TestMergeRemoteState_ShortVsn(t *testing.T) {
+	merge := &captureMergeDelegate{}
+	m := GetMemberlist(t, func(c *Config) {
+		c.Merge = merge
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	// No local nodes so the consensus check passes trivially.
+	m.nodes = nil
+
+	remote := []pushNodeState{
+		{Name: "novsn", Addr: []byte{127, 0, 0, 1}, Port: 8000, State: StateAlive},
+	}
+
+	err := m.mergeRemoteState(true, remote, nil)
+	require.ErrorContains(t, err, "merge canceled by test")
+	require.Len(t, merge.nodes, 1)
+	require.Zero(t, merge.nodes[0].PMin)
+	require.Zero(t, merge.nodes[0].DCur)
+}
+
+func TestReadStream_EmptyDecompressed(t *testing.T) {
+
+	mockNet := &MockNetwork{}
+	tr := mockNet.NewTransport("node")
+	logs := &bytes.Buffer{}
+	logger := log.New(logs, "", 0)
+
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Logger = logger
+		c.Transport = tr
+		c.BindAddr = "127.0.0.1"
+		c.BindPort = 1
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	addr := joinHostPort(m.config.BindAddr, uint16(m.config.BindPort))
+
+	// A compressMsg whose payload decompresses to nothing.
+	msg, err := compressPayload(nil, m.config.MsgpackUseNewTimeFormat)
+	require.NoError(t, err)
+
+	conn, err := tr.DialTimeout(addr, time.Millisecond*100)
+	require.NoError(t, err)
+
+	err = m.rawSendMsgStream(conn, msg.Bytes(), "")
+	require.NoError(t, err)
+
+	// The stream is rejected with an error response before the conn closes.
+	typ := make([]byte, 1)
+	_, err = io.ReadFull(conn, typ)
+	require.NoError(t, err)
+	require.Equal(t, byte(errMsg), typ[0])
+
+	var resp errResp
+	hd := codec.MsgpackHandle{}
+	dec := codec.NewDecoder(conn, &hd)
+	require.NoError(t, dec.Decode(&resp))
+	require.Contains(t, resp.Error, "decompressed message is empty")
+	require.Contains(t, logs.String(),
+		"decompressed message is empty")
+}
+
 func TestHandleConn_NilConnAfterRemoveLabelHeaderFromStream(t *testing.T) {
 	mockNet := &MockNetwork{}
 

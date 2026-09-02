@@ -15,6 +15,25 @@
 
 ### Security
 
+* Ports of four upstream hashicorp/memberlist security fixes, keeping the
+  wire-format semantics unchanged:
+  * `readUserMsg` now rejects a `userMsg` header whose `UserMsgLen` is
+    negative or exceeds `maxUserMsgBytes` (20 MiB) instead of allocating the
+    declared length off the wire (upstream #361).
+  * `decompressBuffer` now caps decompressed output at
+    `maxDecompressedBytes` (2×`maxPushStateBytes`) via `io.CopyN` and errors
+    with "decompressed message is larger than limit" past it, instead of
+    draining the LZW reader into an unbounded buffer (upstream #363).
+  * `readStream` now treats a compressed message that decompresses to an
+    empty payload as an error instead of indexing the empty buffer and
+    panicking (upstream #369).
+  * Short `Vsn` protocol-version vectors read off the wire are now
+    length-checked on all paths: `verifyProtocol` skips nodes with fewer
+    than 5 entries and treats fewer than 6 as version-less, and
+    `mergeRemoteState`/`aliveNode` only copy versions from slices with at
+    least 6 entries, instead of panicking on the short slice (upstream
+    #368).
+
 ## v0.7.0 (Mori)
 
 This release hardens the node lifecycle, shutdown, and delegate-event

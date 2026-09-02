@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	metrics "github.com/hashicorp/go-metrics/compat"
 	iretry "github.com/0xCarbon/mori/internal/retry"
+	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/stretchr/testify/require"
 )
 
@@ -2607,6 +2607,29 @@ func TestVerifyProtocol(t *testing.T) {
 		testVerifyProtocolSingle(t, aApp, bApp, tc.expected)
 		testVerifyProtocolSingle(t, bApp, aApp, tc.expected)
 	}
+}
+
+// TestVerifyProtocol_ShortVsn guards against remote states whose Vsn slices
+// are too short to index: they must be skipped, not dereferenced.
+func TestVerifyProtocol_ShortVsn(t *testing.T) {
+	m := GetMemberlist(t, nil)
+	defer func() {
+		if err := m.Shutdown(); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+	}()
+
+	// No local nodes so the consensus check passes trivially.
+	m.nodes = nil
+
+	remote := []pushNodeState{
+		{Name: "novsn"},
+		{Name: "partialvsn", Vsn: []uint8{1, 2, 3}},
+		{Name: "shortvsn", Vsn: []uint8{1, 2, 3, 4}},
+	}
+
+	err := m.verifyProtocol(remote)
+	require.NoError(t, err)
 }
 
 func testVerifyProtocolSingle(t *testing.T, A [][6]uint8, B [][6]uint8, expect bool) {
