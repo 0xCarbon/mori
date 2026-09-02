@@ -1110,6 +1110,39 @@ func TestReadUserMsg_Limit(t *testing.T) {
 		"user message length (30000000) exceeds limit")
 }
 
+type captureMergeDelegate struct {
+	nodes []*Node
+}
+
+func (c *captureMergeDelegate) NotifyMerge(peers []*Node) error {
+	c.nodes = peers
+	return fmt.Errorf("merge canceled by test")
+}
+
+// TestMergeRemoteState_ShortVsn guards the merge delegate path: short Vsn
+// slices from the wire must reach the delegate without protocol versions
+// instead of panicking on the short slice.
+func TestMergeRemoteState_ShortVsn(t *testing.T) {
+	merge := &captureMergeDelegate{}
+	m := GetMemberlist(t, func(c *Config) {
+		c.Merge = merge
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	// No local nodes so the consensus check passes trivially.
+	m.nodes = nil
+
+	remote := []pushNodeState{
+		{Name: "novsn", Addr: []byte{127, 0, 0, 1}, Port: 8000, State: StateAlive},
+	}
+
+	err := m.mergeRemoteState(true, remote, nil)
+	require.ErrorContains(t, err, "merge canceled by test")
+	require.Len(t, merge.nodes, 1)
+	require.Zero(t, merge.nodes[0].PMin)
+	require.Zero(t, merge.nodes[0].DCur)
+}
+
 func TestReadStream_EmptyDecompressed(t *testing.T) {
 
 	mockNet := &MockNetwork{}
