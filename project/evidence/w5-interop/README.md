@@ -20,7 +20,10 @@ meta and received every message addressed to it.
 ## Receipt
 
 `interop.txt`: two consecutive full runs, 12/12 scenarios PASS each,
-go1.27.1 linux/amd64, new tree at 9f2e968.
+go1.27.1 linux/amd64, new tree at 59b8a99 (the final W8 code; "+dirty"
+there is `interop.txt` itself being rewritten during the run). The first
+receipt was taken at 9f2e968, before the W7 encryption and compression
+changes; this one covers them.
 
 The first harness draft failed for harness reasons (a node leaving before
 its peers reported; user broadcasts handed to a single packet; ports inside

@@ -59,7 +59,7 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
 | W5 | Wire codec: `internal/msgpack` + `internal/wire`, golden vectors, differential evidence; drop go-msgpack | done |
 | W6 | Tests: testify/goleak -> std; synctest for timer-driven tests; flake removal | done |
 | W7 | Performance: UDP receive buffer reuse, encode/decode allocations, benchmarks + evidence | done |
-| W8 | Fuzz targets, SECURITY.md threat model, README/CHANGELOG v0.8.0, independent review | pending |
+| W8 | Fuzz targets, SECURITY.md threat model, README/CHANGELOG v0.8.0, independent review | done |
 
 ## Decisions
 
@@ -144,6 +144,20 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
   CHANGELOG summary. go-modernize: 0/0 with repo and default configs.
   taba check: only break is Config.LogOutput (2 lines); scratch copy with
   the slog migration builds and vets against this tree.
+
+- 2026-09-25 W8b: three independent reviewers (codec, concurrency/security,
+  tests/tooling/docs): no critical/high; 3 medium + 10 low, all fixed or
+  documented (evidence/w8-review/README.md). make ci now includes the 386
+  suite. Fuzz receipt 76.4M execs clean. Interop re-run at 59b8a99: 24/24.
+
+## Status
+
+All waves done. The branch is ready for owner review; nothing is pushed.
+Open items for the owner (outside this repository):
+- taba: replace `mlCfg.LogOutput = io.Discard` with
+  `mlCfg.Logger = slog.New(slog.DiscardHandler)` (and the test override),
+  raise `go` to 1.27.1 and its CI contract test; everything else passes.
+- Tag v0.8.0 after merging, so taba can depend on it.
 
 ## Findings to fix (discovered during the waves)
 
