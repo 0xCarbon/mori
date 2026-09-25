@@ -4,16 +4,13 @@
 package mori
 
 import (
+	"errors"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
 	"time"
-
-	"github.com/hashicorp/go-metrics/compat"
-	"github.com/hashicorp/go-multierror"
 )
 
 type Config struct {
@@ -229,16 +226,11 @@ type Config struct {
 	// at /etc/resolv.conf. It can be overridden via config for easier testing.
 	DNSConfigPath string
 
-	// LogOutput is the writer where logs should be sent. If this is not
-	// set, logging will go to stderr by default. You cannot specify both LogOutput
-	// and Logger at the same time.
-	LogOutput io.Writer
-
-	// Logger is a custom logger which you provide. If Logger is set, it will use
-	// this for the internal logger. If Logger is not set, it will fall back to the
-	// behavior for using LogOutput. You cannot specify both LogOutput and Logger
-	// at the same time.
-	Logger *log.Logger
+	// Logger receives Mori's structured logs. Nil means slog.Default().
+	// Protocol chatter is logged at Debug; conditions an operator should
+	// see at Info, Warn and Error. To silence Mori, pass
+	// slog.New(slog.DiscardHandler).
+	Logger *slog.Logger
 
 	// Size of Memberlist's internal channel which handles UDP messages. The
 	// size of this determines the size of the queue which Memberlist will keep
@@ -286,43 +278,33 @@ type Config struct {
 	// Using [] will block all connections.
 	CIDRsAllowed []net.IPNet
 
-	// MetricLabels is a map of optional labels to apply to all metrics emitted.
-	MetricLabels []metrics.Label
+	// Metrics receives Mori's telemetry (see MetricSink for the metric
+	// list). Nil disables metrics.
+	Metrics MetricSink
+
+	// MetricLabels are labels applied to every metric emitted.
+	MetricLabels []Label
 
 	// QueueCheckInterval is the interval at which we check the message
 	// queue to apply the warning and max depth.
 	QueueCheckInterval time.Duration
-
-	// MsgpackUseNewTimeFormat when set to true, force the underlying msgpack
-	// codec to use the new format of time.Time when encoding (used in
-	// go-msgpack v1.1.5 by default). Decoding is not affected, as all
-	// go-msgpack v2.1.0+ decoders know how to decode both formats.
-	MsgpackUseNewTimeFormat bool
 }
 
-// ParseCIDRs return a possible empty list of all Network that have been parsed
-// In case of error, it returns succesfully parsed CIDRs and the last error found
+// ParseCIDRs parses every entry of v. It returns the networks that parsed
+// and, if any entry failed, an error joining one error per invalid entry
+// (errors.Join). A nil v yields an empty list.
 func ParseCIDRs(v []string) ([]net.IPNet, error) {
-	nets := make([]net.IPNet, 0)
-	if v == nil {
-		return nets, nil
-	}
-	var errs error
-	hasErrors := false
+	nets := make([]net.IPNet, 0, len(v))
+	var errs []error
 	for _, p := range v {
-		_, net, err := net.ParseCIDR(strings.TrimSpace(p))
+		_, ipNet, err := net.ParseCIDR(strings.TrimSpace(p))
 		if err != nil {
-			err = fmt.Errorf("invalid cidr: %s", p)
-			errs = multierror.Append(errs, err)
-			hasErrors = true
-		} else {
-			nets = append(nets, *net)
+			errs = append(errs, fmt.Errorf("invalid cidr: %s", p))
+			continue
 		}
+		nets = append(nets, *ipNet)
 	}
-	if !hasErrors {
-		errs = nil
-	}
-	return nets, errs
+	return nets, errors.Join(errs...)
 }
 
 // DefaultLANConfig returns a sane set of configurations for Memberlist.

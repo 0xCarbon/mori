@@ -4,12 +4,13 @@
 package mori
 
 import (
+	"bytes"
 	"fmt"
+	"math/rand/v2"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestUtil_PortFunctions(t *testing.T) {
@@ -42,12 +43,9 @@ func TestUtil_PortFunctions(t *testing.T) {
 
 func TestEncodeDecode(t *testing.T) {
 	msg := &ping{SeqNo: 100}
-	buf, err := encode(pingMsg, msg, false)
-	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
-	}
+	buf := encode(pingMsg, msg)
 	var out ping
-	if err := decode(buf.Bytes()[1:], &out); err != nil {
+	if err := decode(buf[1:], &out); err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
 	if msg.SeqNo != out.SeqNo {
@@ -58,7 +56,7 @@ func TestEncodeDecode(t *testing.T) {
 func TestRandomOffset(t *testing.T) {
 	vals := make(map[int]struct{})
 	for range 100 {
-		offset := randomOffset(2 << 30)
+		offset := randomOffset(1 << 30) // fits int on 32-bit targets
 		if _, ok := vals[offset]; ok {
 			t.Fatalf("got collision")
 		}
@@ -107,28 +105,28 @@ func TestRetransmitLimit(t *testing.T) {
 
 func TestShuffleNodes(t *testing.T) {
 	orig := []*nodeState{
-		&nodeState{
+		{
 			State: StateDead,
 		},
-		&nodeState{
+		{
 			State: StateAlive,
 		},
-		&nodeState{
+		{
 			State: StateAlive,
 		},
-		&nodeState{
+		{
 			State: StateDead,
 		},
-		&nodeState{
+		{
 			State: StateAlive,
 		},
-		&nodeState{
+		{
 			State: StateAlive,
 		},
-		&nodeState{
+		{
 			State: StateDead,
 		},
-		&nodeState{
+		{
 			State: StateAlive,
 		},
 	}
@@ -188,43 +186,43 @@ func TestPushPullScale(t *testing.T) {
 
 func TestMoveDeadNodes(t *testing.T) {
 	nodes := []*nodeState{
-		&nodeState{
+		{
 			State:       StateDead,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
-		&nodeState{
+		{
 			State:       StateAlive,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
 		// This dead node should not be moved, as its state changed
 		// less than the specified GossipToTheDead time ago
-		&nodeState{
+		{
 			State:       StateDead,
 			StateChange: time.Now().Add(-10 * time.Second),
 		},
 		// This left node should not be moved, as its state changed
 		// less than the specified GossipToTheDead time ago
-		&nodeState{
+		{
 			State:       StateLeft,
 			StateChange: time.Now().Add(-10 * time.Second),
 		},
-		&nodeState{
+		{
 			State:       StateLeft,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
-		&nodeState{
+		{
 			State:       StateAlive,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
-		&nodeState{
+		{
 			State:       StateDead,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
-		&nodeState{
+		{
 			State:       StateAlive,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
-		&nodeState{
+		{
 			State:       StateLeft,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
@@ -274,9 +272,7 @@ func TestKRandomNodes(t *testing.T) {
 			state = StateDead
 		}
 		nodes = append(nodes, &nodeState{
-			Node: Node{
-				Name: fmt.Sprintf("test%d", i),
-			},
+			Name:  fmt.Sprintf("test%d", i),
 			State: state,
 		})
 	}
@@ -331,30 +327,24 @@ func TestKRandomNodes(t *testing.T) {
 
 func TestMakeCompoundMessage(t *testing.T) {
 	msg := &ping{SeqNo: 100}
-	buf, err := encode(pingMsg, msg, false)
-	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
-	}
+	buf := encode(pingMsg, msg)
 
-	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
+	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
 
-	if compound.Len() != 3*buf.Len()+3*compoundOverhead+compoundHeaderOverhead {
+	if len(compound) != 3*len(buf)+3*compoundOverhead+compoundHeaderOverhead {
 		t.Fatalf("bad len")
 	}
 }
 
 func TestDecodeCompoundMessage(t *testing.T) {
 	msg := &ping{SeqNo: 100}
-	buf, err := encode(pingMsg, msg, false)
-	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
-	}
+	buf := encode(pingMsg, msg)
 
-	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
+	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
 
-	trunc, parts, err := decodeCompoundMessage(compound.Bytes()[1:])
+	trunc, parts, err := decodeCompoundMessage(compound[1:])
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
@@ -365,7 +355,7 @@ func TestDecodeCompoundMessage(t *testing.T) {
 		t.Fatalf("bad parts")
 	}
 	for _, p := range parts {
-		if len(p) != buf.Len() {
+		if len(p) != len(buf) {
 			t.Fatalf("bad part len")
 		}
 	}
@@ -374,21 +364,18 @@ func TestDecodeCompoundMessage(t *testing.T) {
 func TestDecodeCompoundMessage_NumberOfPartsOverflow(t *testing.T) {
 	buf := []byte{0x80}
 	_, _, err := decodeCompoundMessage(buf)
-	require.Error(t, err)
-	require.Equal(t, err.Error(), "truncated len slice")
+	isErr(t, err)
+	equal(t, err.Error(), "truncated len slice")
 }
 
 func TestDecodeCompoundMessage_Trunc(t *testing.T) {
 	msg := &ping{SeqNo: 100}
-	buf, err := encode(pingMsg, msg, false)
-	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
-	}
+	buf := encode(pingMsg, msg)
 
-	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
+	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
 
-	trunc, parts, err := decodeCompoundMessage(compound.Bytes()[1:38])
+	trunc, parts, err := decodeCompoundMessage(compound[1:38])
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
@@ -399,19 +386,19 @@ func TestDecodeCompoundMessage_Trunc(t *testing.T) {
 		t.Fatalf("bad parts")
 	}
 	for _, p := range parts {
-		if len(p) != buf.Len() {
+		if len(p) != len(buf) {
 			t.Fatalf("bad part len")
 		}
 	}
 }
 
 func TestCompressDecompressPayload(t *testing.T) {
-	buf, err := compressPayload([]byte("testing"), false)
+	buf, err := compressPayload([]byte("testing"))
 	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
+		t.Fatal(err)
 	}
 
-	decomp, err := decompressPayload(buf.Bytes()[1:])
+	decomp, err := decompressPayload(buf[1:])
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
@@ -419,4 +406,100 @@ func TestCompressDecompressPayload(t *testing.T) {
 	if !reflect.DeepEqual(decomp, []byte("testing")) {
 		t.Fatalf("bad payload: %v", decomp)
 	}
+}
+
+// TestDecompressBufferLimit covers upstream hashicorp/memberlist#363: a small
+// compressed message must not expand without bound. Streams accept up to
+// maxDecompressedBytes; packets, which senders build within the packet
+// budget, accept far less.
+func TestDecompressBufferLimit(t *testing.T) {
+	compressed := func(n int) *compress {
+		buf, err := compressPayload(make([]byte, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var c compress
+		if err := decode(buf[1:], &c); err != nil {
+			t.Fatal(err)
+		}
+		return &c
+	}
+
+	if _, err := decompressBuffer(compressed(maxDecompressedBytes+1), maxDecompressedBytes); err == nil {
+		t.Fatal("stream payload above maxDecompressedBytes was accepted")
+	}
+	if out, err := decompressBuffer(compressed(maxPushStateBytes+1), maxDecompressedBytes); err != nil || len(out) != maxPushStateBytes+1 {
+		t.Fatalf("stream payload within the limit: len %d, err %v", len(out), err)
+	}
+
+	bomb, err := compressPayload(make([]byte, maxPacketDecompressedBytes+1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bomb) > 65507 {
+		t.Fatalf("test bomb does not fit one UDP payload: %d bytes", len(bomb))
+	}
+	if _, err := decompressPayload(bomb[1:]); err == nil {
+		t.Fatal("packet payload above maxPacketDecompressedBytes was accepted")
+	}
+}
+
+// TestMaxIncompressiblePacket: no message of at most maxIncompressiblePacket
+// bytes compresses to fewer bytes, so skipping compression for them cannot
+// change what is sent. The most compressible inputs (short periods) are
+// checked, and a 25-byte run of zeros does compress, so the bound is not
+// vacuous.
+func TestMaxIncompressiblePacket(t *testing.T) {
+	r := rand.New(rand.NewPCG(3, 4))
+	for n := 1; n <= maxIncompressiblePacket; n++ {
+		inputs := [][]byte{}
+		for period := 1; period <= 4; period++ {
+			in := make([]byte, n)
+			for i := range in {
+				in[i] = byte(i % period)
+			}
+			inputs = append(inputs, in)
+		}
+		for range 64 {
+			in := make([]byte, n)
+			for i := range in {
+				in[i] = byte(r.IntN(3))
+			}
+			inputs = append(inputs, in)
+		}
+		for _, in := range inputs {
+			out, err := compressPayload(in)
+			noErr(t, err)
+			if len(out) < len(in) {
+				t.Fatalf("%d-byte input %x compressed to %d bytes", n, in, len(out))
+			}
+		}
+	}
+	out, err := compressPayload(make([]byte, 25))
+	noErr(t, err)
+	less(t, len(out), 25, "a 25-byte zero run must compress")
+}
+
+// TestCompressionConcurrent exercises the pooled LZW coders from many
+// goroutines (run under -race in make ci).
+func TestCompressionConcurrent(t *testing.T) {
+	var wg sync.WaitGroup
+	for g := range 16 {
+		wg.Go(func() {
+			for i := range 200 {
+				in := bytes.Repeat([]byte{byte(g), byte(i)}, 100+i)
+				out, err := compressPayload(in)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				got, err := decompressPayload(out[1:])
+				if err != nil || !bytes.Equal(got, in) {
+					t.Errorf("round trip %d/%d: %v", g, i, err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
 }

@@ -23,7 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"net"
 	"os"
@@ -32,11 +32,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	metrics "github.com/hashicorp/go-metrics/compat"
-	"github.com/hashicorp/go-multierror"
-	"github.com/hashicorp/go-sockaddr"
-	"github.com/miekg/dns"
 )
 
 var errNodeNamesAreRequired = errors.New("memberlist: node names are required by configuration but one was not provided")
@@ -55,6 +50,10 @@ var (
 	// ErrNoLocalNode is returned when the local node is missing from the
 	// node map, e.g. because the instance never went alive.
 	ErrNoLocalNode = errors.New("memberlist: local node not found in node map")
+
+	// ErrMessageTooLarge is returned by SendReliable for a message larger
+	// than receivers accept on a stream (20 MiB).
+	ErrMessageTooLarge = errors.New("memberlist: message exceeds the stream user message limit")
 
 	// ErrLeft is returned by UpdateNode/UpdateNodeContext after the node
 	// has left the cluster: the update can never be broadcast, because
@@ -149,10 +148,9 @@ type Memberlist struct {
 	// UDPBufferSize is unset). Zero or negative means no packet budget.
 	packetBufferSize int
 
-	logger *log.Logger
+	logger *slog.Logger
 
-	// metricLabels is the slice of labels to put on all emitted metrics
-	metricLabels []metrics.Label
+	metrics *telemetry
 }
 
 // BuildVsnArray creates the array of Vsn
@@ -167,6 +165,23 @@ func (conf *Config) BuildVsnArray() []uint8 {
 // newMemberlist creates the network listeners.
 // Does not schedule execution of background maintenance.
 func newMemberlist(conf *Config) (*Memberlist, error) {
+	m, err := buildMemberlist(conf)
+	if err != nil {
+		return nil, err
+	}
+	m.goBackground(m.streamListen)
+	m.goBackground(m.packetListen)
+	m.goBackground(m.packetHandler)
+	m.goBackground(m.checkBroadcastQueueDepth)
+	m.eventWG.Go(m.eventDispatch)
+	return m, nil
+}
+
+// buildMemberlist validates conf and assembles an instance without
+// starting any goroutine: newMemberlist starts the listeners, handler and
+// event dispatcher. Tests that drive the handlers synchronously use it
+// directly.
+func buildMemberlist(conf *Config) (*Memberlist, error) {
 	if conf.ProtocolVersion < ProtocolVersionMin {
 		return nil, fmt.Errorf("protocol version '%d' too low. Must be in range: [%d, %d]",
 			conf.ProtocolVersion, ProtocolVersionMin, ProtocolVersionMax)
@@ -192,18 +207,9 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		}
 	}
 
-	if conf.LogOutput != nil && conf.Logger != nil {
-		return nil, fmt.Errorf("cannot specify both LogOutput and Logger; please choose a single log configuration setting")
-	}
-
-	logDest := conf.LogOutput
-	if logDest == nil {
-		logDest = os.Stderr
-	}
-
 	logger := conf.Logger
 	if logger == nil {
-		logger = log.New(logDest, "", log.LstdFlags)
+		logger = slog.Default()
 	}
 
 	// Set up a network transport by default if a custom one wasn't given
@@ -214,6 +220,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 			BindAddrs:    []string{conf.BindAddr},
 			BindPort:     conf.BindPort,
 			Logger:       logger,
+			Metrics:      conf.Metrics,
 			MetricLabels: conf.MetricLabels,
 		}
 
@@ -226,7 +233,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 					return nt, nil
 				}
 				if strings.Contains(err.Error(), "address already in use") {
-					logger.Printf("[DEBUG] memberlist: Got bind error: %v", err)
+					logger.Debug("got bind error", "error", err)
 					continue
 				}
 			}
@@ -253,14 +260,14 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 			port := nt.GetAutoBindPort()
 			conf.BindPort = port
 			conf.AdvertisePort = port
-			logger.Printf("[DEBUG] memberlist: Using dynamic bind port %d", port)
+			logger.Debug("using dynamic bind port", "port", port)
 		}
 		transport = nt
 	}
 
 	nodeAwareTransport, ok := transport.(NodeAwareTransport)
 	if !ok {
-		logger.Printf("[DEBUG] memberlist: configured Transport is not a NodeAwareTransport and some features may not work as desired")
+		logger.Debug("configured Transport is not a NodeAwareTransport and some features may not work as desired")
 		nodeAwareTransport = &shimNodeAwareTransport{transport}
 	}
 
@@ -275,6 +282,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		}
 	}
 
+	metrics := newTelemetry(conf.Metrics, conf.MetricLabels)
 	m := &Memberlist{
 		config:               conf,
 		shutdownCh:           make(chan struct{}),
@@ -289,11 +297,11 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		lowPriorityMsgQueue:  list.New(),
 		nodeMap:              make(map[string]*nodeState),
 		nodeTimers:           make(map[string]*suspicion),
-		awareness:            newAwareness(conf.AwarenessMaxMultiplier, conf.MetricLabels),
+		awareness:            newAwareness(conf.AwarenessMaxMultiplier, metrics),
 		ackHandlers:          make(map[uint32]*ackHandler),
 		broadcasts:           &TransmitLimitedQueue{RetransmitMult: conf.RetransmitMult},
 		logger:               logger,
-		metricLabels:         conf.MetricLabels,
+		metrics:              metrics,
 	}
 	m.broadcasts.NumNodes = func() int {
 		return m.estNumNodes()
@@ -316,7 +324,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 	// with no clear signal.
 	if err := m.validateMetaMaxSize(); err != nil {
 		if serr := m.transport.Shutdown(); serr != nil {
-			logger.Printf("[ERR] Failed to shutdown transport: %v", serr)
+			logger.Error("failed to shut down transport", "error", serr)
 		}
 		return nil, err
 	}
@@ -328,11 +336,6 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		return nil, err
 	}
 
-	m.goBackground(m.streamListen)
-	m.goBackground(m.packetListen)
-	m.goBackground(m.packetHandler)
-	m.goBackground(m.checkBroadcastQueueDepth)
-	m.eventWG.Go(m.eventDispatch)
 	return m, nil
 }
 
@@ -377,13 +380,13 @@ func Create(conf *Config) (*Memberlist, error) {
 // join the cluster.
 func (m *Memberlist) Join(existing []string) (int, error) {
 	numSuccess := 0
-	var errs error
+	var errs []error
 	for _, exist := range existing {
 		addrs, err := m.resolveAddr(exist)
 		if err != nil {
-			err = fmt.Errorf("failed to resolve %s: %v", exist, err)
-			errs = multierror.Append(errs, err)
-			m.logger.Printf("[WARN] memberlist: %v", err)
+			err = fmt.Errorf("failed to resolve %s: %w", exist, err)
+			errs = append(errs, err)
+			m.logger.Warn("join: failed to resolve", "error", err)
 			continue
 		}
 
@@ -391,19 +394,18 @@ func (m *Memberlist) Join(existing []string) (int, error) {
 			hp := joinHostPort(addr.ip.String(), addr.port)
 			a := Address{Addr: hp, Name: addr.nodeName}
 			if err := m.pushPullNode(a, true); err != nil {
-				err = fmt.Errorf("failed to join %s: %v", a.Addr, err)
-				errs = multierror.Append(errs, err)
-				m.logger.Printf("[DEBUG] memberlist: %v", err)
+				err = fmt.Errorf("failed to join %s: %w", a.Addr, err)
+				errs = append(errs, err)
+				m.logger.Debug("join: failed to join", "error", err)
 				continue
 			}
 			numSuccess++
 		}
-
 	}
 	if numSuccess > 0 {
-		errs = nil
+		return numSuccess, nil
 	}
-	return numSuccess, errs
+	return 0, errors.Join(errs...)
 }
 
 // ipPort holds information about a node we want to try to join.
@@ -419,6 +421,11 @@ type ipPort struct {
 // Consul's. By doing the TCP lookup directly, we get the best chance for the
 // largest list of hosts to join. Since joins are relatively rare events, it's ok
 // to do this rather expensive operation.
+//
+// The lookup asks for A and AAAA records through the first nameserver of
+// Config.DNSConfigPath. It deliberately does not use an ANY query: resolvers
+// following RFC 8482 answer ANY with a single synthesized HINFO record, which
+// would make this lookup silently empty.
 func (m *Memberlist) tcpLookupIP(host string, defaultPort uint16, nodeName string) ([]ipPort, error) {
 	// Don't attempt any TCP lookups against non-fully qualified domain
 	// names, since those will likely come from the resolv.conf file.
@@ -427,51 +434,66 @@ func (m *Memberlist) tcpLookupIP(host string, defaultPort uint16, nodeName strin
 	}
 
 	// Make sure the domain name is terminated with a dot (we know there's
-	// at least one character at this point).
+	// at least one character at this point), so no search domain applies.
 	dn := host
 	if dn[len(dn)-1] != '.' {
 		dn = dn + "."
 	}
 
 	// See if we can find a server to try.
-	cc, err := dns.ClientConfigFromFile(m.config.DNSConfigPath)
+	servers, err := readNameservers(m.config.DNSConfigPath)
 	if err != nil {
 		return nil, err
 	}
-	if len(cc.Servers) > 0 {
-		// We support host:port in the DNS config, but need to add the
-		// default port if one is not supplied.
-		server := cc.Servers[0]
-		if !hasPort(server) {
-			server = net.JoinHostPort(server, cc.Port)
-		}
+	if len(servers) == 0 {
+		return nil, nil
+	}
+	server := servers[0]
 
-		// Do the lookup.
-		c := new(dns.Client)
-		c.Net = "tcp"
-		msg := new(dns.Msg)
-		msg.SetQuestion(dn, dns.TypeANY)
-		in, _, err := c.Exchange(msg, server)
-		if err != nil {
-			return nil, err
-		}
-
-		// Handle any IPs we get back that we can attempt to join.
-		var ips []ipPort
-		for _, r := range in.Answer {
-			switch rr := r.(type) {
-			case (*dns.A):
-				ips = append(ips, ipPort{ip: rr.A, port: defaultPort, nodeName: nodeName})
-			case (*dns.AAAA):
-				ips = append(ips, ipPort{ip: rr.AAAA, port: defaultPort, nodeName: nodeName})
-			case (*dns.CNAME):
-				m.logger.Printf("[DEBUG] memberlist: Ignoring CNAME RR in TCP-first answer for '%s'", host)
-			}
-		}
-		return ips, nil
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", server)
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), m.config.TCPTimeout)
+	defer cancel()
+	addrs, err := resolver.LookupNetIP(ctx, "ip", dn)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, nil
+	ips := make([]ipPort, 0, len(addrs))
+	for _, addr := range addrs {
+		ips = append(ips, ipPort{ip: net.IP(addr.Unmap().AsSlice()), port: defaultPort, nodeName: nodeName})
+	}
+	return ips, nil
+}
+
+// readNameservers returns the nameserver addresses (host:port) listed in a
+// resolv.conf-format file, in order. Entries without a port use 53.
+func readNameservers(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var servers []string
+	for line := range strings.Lines(string(data)) {
+		if i := strings.IndexAny(line, "#;"); i >= 0 {
+			line = line[:i]
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "nameserver" {
+			continue
+		}
+		server := fields[1]
+		if !hasPort(server) {
+			server = net.JoinHostPort(strings.Trim(server, "[]"), "53")
+		}
+		servers = append(servers, server)
+	}
+	return servers, nil
 }
 
 // resolveAddr is used to resolve the address into an address,
@@ -504,7 +526,7 @@ func (m *Memberlist) resolveAddr(hostStr string) ([]ipPort, error) {
 	// IPv6 addresses.
 	if ip := net.ParseIP(host); ip != nil {
 		return []ipPort{
-			ipPort{ip: ip, port: port, nodeName: nodeName},
+			{ip: ip, port: port, nodeName: nodeName},
 		}, nil
 	}
 
@@ -513,7 +535,7 @@ func (m *Memberlist) resolveAddr(hostStr string) ([]ipPort, error) {
 	// way to query DNS, and we have a fallback below.
 	ips, err := m.tcpLookupIP(host, port, nodeName)
 	if err != nil {
-		m.logger.Printf("[DEBUG] memberlist: TCP-first lookup failed for '%s', falling back to UDP: %s", hostStr, err)
+		m.logger.Debug("TCP-first lookup failed, falling back to the system resolver", "host", hostStr, "error", err)
 	}
 	if len(ips) > 0 {
 		return ips, nil
@@ -545,19 +567,8 @@ func (m *Memberlist) setAlive(receipt *eventReceipt) error {
 	}
 
 	// Check if this is a public address without encryption
-	ipAddr, err := sockaddr.NewIPAddr(addr.String())
-	if err != nil {
-		return fmt.Errorf("failed to parse interface addresses: %v", err)
-	}
-	ifAddrs := []sockaddr.IfAddr{
-		sockaddr.IfAddr{
-			SockAddr: ipAddr,
-		},
-	}
-	_, publicIfs, _ := sockaddr.IfByRFC("6890", ifAddrs)
-
-	if len(publicIfs) > 0 && !m.config.EncryptionEnabled() {
-		m.logger.Printf("[WARN] memberlist: Binding to public address without encryption!")
+	if isPublicAddress(addr) && !m.config.EncryptionEnabled() {
+		m.logger.Warn("binding to a public address without encryption", "addr", addr)
 	}
 
 	// Set any metadata from the delegate.
@@ -693,11 +704,7 @@ func (m *Memberlist) validateMetaMaxSize() error {
 		Meta:        make([]byte, limit),
 		Vsn:         m.config.BuildVsnArray(),
 	}
-	buf, err := encode(aliveMsg, &a, m.config.MsgpackUseNewTimeFormat)
-	if err != nil {
-		return fmt.Errorf("memberlist: could not size a full alive message: %w", err)
-	}
-	if msgSize := buf.Len(); msgSize > budget {
+	if msgSize := len(encode(aliveMsg, a)); msgSize > budget {
 		return fmt.Errorf("memberlist: MetaMaxSize %d does not fit the transport packet budget: a full-size alive message is %d bytes but only %d are available (UDPBufferSize or the transport's MaxPacketSize, minus gossip framing, CRC, label and encryption overhead)",
 			limit, msgSize, budget)
 	}
@@ -951,8 +958,9 @@ func (m *Memberlist) SendBestEffort(to *Node, msg []byte) error {
 
 // SendReliable uses the reliable stream-oriented interface of the transport to
 // target a user message at the given node (this does not use the gossip
-// mechanism). Delivery is guaranteed if no error is returned, and there is no
-// limit on the size of the message.
+// mechanism). A nil error means the message was written to the stream.
+// Messages above 20 MiB, which receivers refuse, fail with
+// ErrMessageTooLarge.
 func (m *Memberlist) SendReliable(to *Node, msg []byte) error {
 	return m.sendUserMsg(to.FullAddress(), msg)
 }
@@ -1240,7 +1248,7 @@ func (m *Memberlist) Shutdown() error {
 		// completely torn down. If we kill the memberlist-side handlers
 		// those I/O handlers might get stuck.
 		if err := m.transport.Shutdown(); err != nil {
-			m.logger.Printf("[ERR] Failed to shutdown transport: %v", err)
+			m.logger.Error("failed to shut down transport", "error", err)
 		}
 
 		// Now tear down everything else.
@@ -1341,7 +1349,7 @@ func (m *Memberlist) checkBroadcastQueueDepth() {
 		select {
 		case <-time.After(m.config.QueueCheckInterval):
 			numq := m.broadcasts.NumQueued()
-			metrics.AddSampleWithLabels([]string{"memberlist", "queue", "broadcasts"}, float32(numq), m.metricLabels)
+			m.metrics.sample(keyQueueBroadcasts, float32(numq))
 		case <-m.shutdownCh:
 			return
 		}

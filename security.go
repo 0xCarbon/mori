@@ -8,8 +8,9 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"errors"
 	"fmt"
-	"io"
+	"slices"
 )
 
 /*
@@ -45,15 +46,18 @@ func pkcs7encode(buf *bytes.Buffer, ignore, blockSize int) {
 	}
 }
 
-// pkcs7decode is used to decode a buffer that has been padded
-func pkcs7decode(buf []byte, _ int) []byte {
+// pkcs7decode removes PKCS7 padding. The pad length must be between 1 and
+// blockSize and fit the buffer; the padded bytes are authenticated by GCM,
+// so a malformed pad means a misbehaving key holder, not line noise.
+func pkcs7decode(buf []byte, blockSize int) ([]byte, error) {
 	if len(buf) == 0 {
-		panic("Cannot decode a PKCS7 buffer of zero length")
+		return nil, errors.New("cannot decode a PKCS7 buffer of zero length")
 	}
-	n := len(buf)
-	last := buf[n-1]
-	n -= int(last)
-	return buf[:n]
+	pad := int(buf[len(buf)-1])
+	if pad < 1 || pad > blockSize || pad > len(buf) {
+		return nil, fmt.Errorf("invalid PKCS7 padding length %d", pad)
+	}
+	return buf[:len(buf)-pad], nil
 }
 
 // encryptOverhead returns the maximum possible overhead of encryption by version
@@ -83,93 +87,56 @@ func encryptedLength(vsn encryptionVersion, inp int) int {
 	return versionSize + nonceSize + inp + padding + tagSize
 }
 
-// encryptPayload is used to encrypt a message with a given key.
-// We make use of AES-128 in GCM mode. New byte buffer is the version,
-// nonce, ciphertext and tag
+// newAEAD returns the AES-GCM cipher for key.
+func newAEAD(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+// sealPayload appends the encryption of msg, authenticating data, to dst:
+// version byte, random nonce, then the GCM ciphertext (of msg PKCS7-padded
+// for version 0).
+func sealPayload(vsn encryptionVersion, gcm cipher.AEAD, msg, data, dst []byte) ([]byte, error) {
+	dst = slices.Grow(dst, encryptedLength(vsn, len(msg)))
+	dst = append(dst, byte(vsn))
+	start := len(dst)
+	dst = dst[:start+nonceSize]
+	nonce := dst[start:]
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	src := msg
+	if vsn == 0 {
+		pad := blockSize - len(msg)%blockSize
+		src = make([]byte, len(msg), len(msg)+pad)
+		copy(src, msg)
+		for range pad {
+			src = append(src, byte(pad))
+		}
+	}
+	return gcm.Seal(dst, nonce, src, data), nil
+}
+
+// encryptPayload encrypts msg with key into dst (see sealPayload).
 func encryptPayload(vsn encryptionVersion, key []byte, msg []byte, data []byte, dst *bytes.Buffer) error {
-	// Get the AES block cipher
-	aesBlock, err := aes.NewCipher(key)
+	gcm, err := newAEAD(key)
 	if err != nil {
 		return err
 	}
-
-	// Get the GCM cipher mode
-	gcm, err := cipher.NewGCM(aesBlock)
+	out, err := sealPayload(vsn, gcm, msg, data, nil)
 	if err != nil {
 		return err
 	}
-
-	// Grow the buffer to make room for everything
-	offset := dst.Len()
-	dst.Grow(encryptedLength(vsn, len(msg)))
-
-	// Write the encryption version
-	dst.WriteByte(byte(vsn))
-
-	// Add a random nonce
-	_, err = io.CopyN(dst, rand.Reader, nonceSize)
-	if err != nil {
-		return err
-	}
-	afterNonce := dst.Len()
-
-	// Ensure we are correctly padded (only version 0)
-	if vsn == 0 {
-		_, _ = io.Copy(dst, bytes.NewReader(msg))
-		pkcs7encode(dst, offset+versionSize+nonceSize, aes.BlockSize)
-	}
-
-	// Encrypt message using GCM
-	slice := dst.Bytes()[offset:]
-	nonce := slice[versionSize : versionSize+nonceSize]
-
-	// Message source depends on the encryption version.
-	// Version 0 uses padding, version 1 does not
-	var src []byte
-	if vsn == 0 {
-		src = slice[versionSize+nonceSize:]
-	} else {
-		src = msg
-	}
-	out := gcm.Seal(nil, nonce, src, data)
-
-	// Truncate the plaintext, and write the cipher text
-	dst.Truncate(afterNonce)
 	dst.Write(out)
 	return nil
 }
 
-// decryptMessage performs the actual decryption of ciphertext. This is in its
-// own function to allow it to be called on all keys easily.
-func decryptMessage(key, msg []byte, data []byte) ([]byte, error) {
-	// Get the AES block cipher
-	aesBlock, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get the GCM cipher mode
-	gcm, err := cipher.NewGCM(aesBlock)
-	if err != nil {
-		return nil, err
-	}
-
-	// Decrypt the message
-	nonce := msg[versionSize : versionSize+nonceSize]
-	ciphertext := msg[versionSize+nonceSize:]
-	plain, err := gcm.Open(nil, nonce, ciphertext, data)
-	if err != nil {
-		return nil, err
-	}
-
-	// Success!
-	return plain, nil
-}
-
-// decryptPayload is used to decrypt a message with a given key,
-// and verify it's contents. Any padding will be removed, and a
-// slice to the plaintext is returned. Decryption is done IN PLACE!
-func decryptPayload(keys [][]byte, msg []byte, data []byte) ([]byte, error) {
+// openPayload decrypts msg with the first cipher that authenticates it,
+// removing version-0 padding.
+func openPayload(aeads []cipher.AEAD, msg []byte, data []byte) ([]byte, error) {
 	// Ensure we have at least one byte
 	if len(msg) == 0 {
 		return nil, fmt.Errorf("cannot decrypt empty payload")
@@ -186,19 +153,32 @@ func decryptPayload(keys [][]byte, msg []byte, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("payload is too small to decrypt: %d", len(msg))
 	}
 
-	for _, key := range keys {
-		plain, err := decryptMessage(key, msg, data)
+	nonce := msg[versionSize : versionSize+nonceSize]
+	ciphertext := msg[versionSize+nonceSize:]
+	for _, gcm := range aeads {
+		plain, err := gcm.Open(nil, nonce, ciphertext, data)
 		if err == nil {
-			// Remove the PKCS7 padding for vsn 0
 			if vsn == 0 {
-				return pkcs7decode(plain, aes.BlockSize), nil
-			} else {
-				return plain, nil
+				return pkcs7decode(plain, aes.BlockSize)
 			}
+			return plain, nil
 		}
 	}
 
 	return nil, fmt.Errorf("no installed keys could decrypt the message")
+}
+
+// decryptPayload decrypts msg with the given raw keys (see openPayload).
+func decryptPayload(keys [][]byte, msg []byte, data []byte) ([]byte, error) {
+	aeads := make([]cipher.AEAD, 0, len(keys))
+	for _, key := range keys {
+		gcm, err := newAEAD(key)
+		if err != nil {
+			return nil, err
+		}
+		aeads = append(aeads, gcm)
+	}
+	return openPayload(aeads, msg, data)
 }
 
 func appendBytes(first []byte, second []byte) []byte {

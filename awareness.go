@@ -6,8 +6,6 @@ package mori
 import (
 	"sync"
 	"time"
-
-	"github.com/hashicorp/go-metrics/compat"
 )
 
 // awareness manages a simple metric for tracking the estimated health of the
@@ -25,16 +23,15 @@ type awareness struct {
 	// zero is the minimum value.
 	score int
 
-	// metricLabels is the slice of labels to put on all emitted metrics
-	metricLabels []metrics.Label
+	metrics *telemetry
 }
 
 // newAwareness returns a new awareness object.
-func newAwareness(max int, metricLabels []metrics.Label) *awareness {
+func newAwareness(max int, metrics *telemetry) *awareness {
 	return &awareness{
-		max:          max,
-		score:        0,
-		metricLabels: metricLabels,
+		max:     max,
+		score:   0,
+		metrics: metrics,
 	}
 }
 
@@ -54,7 +51,7 @@ func (a *awareness) ApplyDelta(delta int) {
 	a.Unlock()
 
 	if initial != final {
-		metrics.SetGaugeWithLabels([]string{"memberlist", "health", "score"}, float32(final), a.metricLabels)
+		a.metrics.gauge(keyHealthScore, float32(final))
 	}
 }
 

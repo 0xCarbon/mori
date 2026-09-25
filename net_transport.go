@@ -5,16 +5,14 @@ package mori
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	metrics "github.com/hashicorp/go-metrics/compat"
-	sockaddr "github.com/hashicorp/go-sockaddr"
 )
 
 const (
@@ -41,11 +39,14 @@ type NetTransportConfig struct {
 	BindPort int
 
 	// Logger is a logger for operator messages.
-	Logger *log.Logger
+	Logger *slog.Logger
 
-	// MetricLabels is a map of optional labels to apply to all metrics
-	// emitted by this transport.
-	MetricLabels []metrics.Label
+	// Metrics receives the transport's telemetry; nil disables it.
+	Metrics MetricSink
+
+	// MetricLabels are labels applied to every metric emitted by this
+	// transport.
+	MetricLabels []Label
 }
 
 // NetTransport is a Transport implementation that uses connectionless UDP for
@@ -54,13 +55,13 @@ type NetTransport struct {
 	config       *NetTransportConfig
 	packetCh     chan *Packet
 	streamCh     chan net.Conn
-	logger       *log.Logger
+	logger       *slog.Logger
 	wg           sync.WaitGroup
 	tcpListeners []*net.TCPListener
 	udpListeners []*net.UDPConn
 	shutdown     atomic.Int32
 
-	metricLabels []metrics.Label
+	metrics *telemetry
 }
 
 var _ NodeAwareTransport = (*NetTransport)(nil)
@@ -77,11 +78,11 @@ func NewNetTransport(config *NetTransportConfig) (*NetTransport, error) {
 	// Build out the new transport.
 	var ok bool
 	t := NetTransport{
-		config:       config,
-		packetCh:     make(chan *Packet),
-		streamCh:     make(chan net.Conn),
-		logger:       config.Logger,
-		metricLabels: config.MetricLabels,
+		config:   config,
+		packetCh: make(chan *Packet),
+		streamCh: make(chan net.Conn),
+		logger:   cmp.Or(config.Logger, slog.Default()),
+		metrics:  newTelemetry(config.Metrics, config.MetricLabels),
 	}
 
 	// Clean up listeners if there's an error.
@@ -160,19 +161,15 @@ func (t *NetTransport) FinalAdvertiseAddr(ip string, port int) (net.IP, int, err
 		if t.config.BindAddrs[0] == "0.0.0.0" {
 			// Otherwise, if we're not bound to a specific IP, let's
 			// use a suitable private IP address.
-			var err error
-			ip, err = sockaddr.GetPrivateIP()
+			addr, err := privateAdvertiseAddr()
 			if err != nil {
-				return nil, 0, fmt.Errorf("failed to get interface addresses: %v", err)
+				return nil, 0, fmt.Errorf("failed to get interface addresses: %w", err)
 			}
-			if ip == "" {
-				return nil, 0, fmt.Errorf("no private IP address found, and explicit IP not provided")
-			}
-
-			advertiseAddr = net.ParseIP(ip)
-			if advertiseAddr == nil {
-				return nil, 0, fmt.Errorf("failed to parse advertise address: %q", ip)
-			}
+			// The 16-byte form (IPv4-mapped for IPv4) is what this path has
+			// always advertised; peers compare stored addresses bytewise, so
+			// keep it stable across upgrades.
+			a16 := addr.As16()
+			advertiseAddr = net.IP(a16[:])
 		} else {
 			// Use the IP that we're bound to, based on the first
 			// TCP listener, which we already ensure is there.
@@ -232,7 +229,7 @@ func (t *NetTransport) IngestPacket(conn net.Conn, addr net.Addr, now time.Time,
 	// message. This is checked elsewhere for writes coming in directly from
 	// the UDP socket.
 	if n := buf.Len(); n < 1 {
-		return fmt.Errorf("packet too short (%d bytes) %s", n, LogAddress(addr))
+		return fmt.Errorf("packet too short (%d bytes) from %s", n, addr)
 	}
 
 	// Inject the packet.
@@ -324,7 +321,7 @@ func (t *NetTransport) tcpListen(tcpLn *net.TCPListener) {
 				loopDelay = maxDelay
 			}
 
-			t.logger.Printf("[ERR] memberlist: Error accepting TCP connection: %v", err)
+			t.logger.Error("error accepting TCP connection", "error", err)
 			time.Sleep(loopDelay)
 			continue
 		}
@@ -339,10 +336,13 @@ func (t *NetTransport) tcpListen(tcpLn *net.TCPListener) {
 // hands them off to the packet channel.
 func (t *NetTransport) udpListen(udpLn *net.UDPConn) {
 	defer t.wg.Done()
+	// One receive buffer for the listener's lifetime: each packet is copied
+	// out at its real size. Allocating a 64 KiB buffer per datagram, as
+	// before, cost ~64 KiB of garbage per gossip packet.
+	buf := make([]byte, udpPacketBufSize)
 	for {
-		// Do a blocking read into a fresh buffer. Grab a time stamp as
-		// close as possible to the I/O.
-		buf := make([]byte, udpPacketBufSize)
+		// Do a blocking read. Grab a time stamp as close as possible to
+		// the I/O.
 		n, addr, err := udpLn.ReadFrom(buf)
 		ts := time.Now()
 		if err != nil {
@@ -350,22 +350,21 @@ func (t *NetTransport) udpListen(udpLn *net.UDPConn) {
 				break
 			}
 
-			t.logger.Printf("[ERR] memberlist: Error reading UDP packet: %v", err)
+			t.logger.Error("error reading UDP packet", "error", err)
 			continue
 		}
 
 		// Check the length - it needs to have at least one byte to be a
 		// proper message.
 		if n < 1 {
-			t.logger.Printf("[ERR] memberlist: UDP packet too short (%d bytes) %s",
-				len(buf), LogAddress(addr))
+			t.logger.Error("UDP packet too short", "bytes", n, addrAttr(addr))
 			continue
 		}
 
 		// Ingest the packet.
-		metrics.IncrCounterWithLabels([]string{"memberlist", "udp", "received"}, float32(n), t.metricLabels)
+		t.metrics.counter(keyUDPReceived, float32(n))
 		t.packetCh <- &Packet{
-			Buf:       buf[:n],
+			Buf:       bytes.Clone(buf[:n]),
 			From:      addr,
 			Timestamp: ts,
 		}

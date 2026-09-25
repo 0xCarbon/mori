@@ -5,16 +5,15 @@ package mori
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	metrics "github.com/hashicorp/go-metrics/compat"
 )
 
 type NodeStateType int
@@ -76,12 +75,24 @@ func (n *Node) String() string {
 	return n.Name
 }
 
-// NodeState is used to manage our state view of another node
+// versions returns the node's protocol version vector.
+func (n *Node) versions() [vsnLen]uint8 {
+	return [vsnLen]uint8{n.PMin, n.PMax, n.PCur, n.DMin, n.DMax, n.DCur}
+}
+
+// setVersions sets the node's protocol versions from a validated vector.
+func (n *Node) setVersions(vsn [vsnLen]uint8) {
+	n.PMin, n.PMax, n.PCur = vsn[0], vsn[1], vsn[2]
+	n.DMin, n.DMax, n.DCur = vsn[3], vsn[4], vsn[5]
+}
+
+// nodeState is used to manage our state view of another node. The node's
+// current state is the embedded Node.State, so every Node copy handed to
+// users (Members, LocalNode, event callbacks) reports it.
 type nodeState struct {
 	Node
-	Incarnation uint32        // Last known incarnation number
-	State       NodeStateType // Current state
-	StateChange time.Time     // Time last state change happened
+	Incarnation uint32    // Last known incarnation number
+	StateChange time.Time // Time last state change happened
 }
 
 // Address returns the host:port form of a node's address, suitable for use
@@ -98,6 +109,25 @@ func (n *nodeState) FullAddress() Address {
 
 func (n *nodeState) DeadOrLeft() bool {
 	return n.State == StateDead || n.State == StateLeft
+}
+
+// vsnLen is the number of entries in a protocol version vector: pmin,
+// pmax, pcur, dmin, dmax, dcur.
+const vsnLen = 6
+
+// parseVsn validates a protocol version vector received from the network.
+// Correct senders emit vsnLen entries; legacy protocol-0 senders emit none,
+// which means all-zero versions. A vector in between is malformed and must
+// be refused rather than indexed. Entries past vsnLen are ignored.
+func parseVsn(v []uint8) (vsn [vsnLen]uint8, ok bool) {
+	if len(v) == 0 {
+		return vsn, true
+	}
+	if len(v) < vsnLen {
+		return vsn, false
+	}
+	copy(vsn[:], v)
+	return vsn, true
 }
 
 // ackHandler is used to register handlers for incoming acks and nacks.
@@ -165,7 +195,7 @@ func (m *Memberlist) schedule() {
 // message is received until a stop tick arrives.
 func (m *Memberlist) triggerFunc(stagger time.Duration, C <-chan time.Time, stop <-chan struct{}, f func()) {
 	// Use a random stagger to avoid syncronizing
-	randStagger := time.Duration(uint64(rand.Int63()) % uint64(stagger))
+	randStagger := rand.N(stagger)
 	select {
 	case <-time.After(randStagger):
 	case <-stop:
@@ -189,7 +219,7 @@ func (m *Memberlist) pushPullTrigger(stop <-chan struct{}) {
 	interval := m.config.PushPullInterval
 
 	// Use a random stagger to avoid syncronizing
-	randStagger := time.Duration(uint64(rand.Int63()) % uint64(interval))
+	randStagger := rand.N(interval)
 	select {
 	case <-time.After(randStagger):
 	case <-stop:
@@ -306,14 +336,14 @@ func failedRemote(err error) bool {
 
 // probeNode handles a single round of failure checking on a node.
 func (m *Memberlist) probeNode(node *nodeState) {
-	defer metrics.MeasureSinceWithLabels([]string{"memberlist", "probeNode"}, time.Now(), m.metricLabels)
+	defer m.metrics.since(keyProbeNode, time.Now())
 
 	// We use our health awareness to scale the overall probe interval, so we
 	// slow down if we detect problems. The ticker that calls us can handle
 	// us running over the base interval, and will skip missed ticks.
 	probeInterval := m.awareness.ScaleTimeout(m.config.ProbeInterval)
 	if probeInterval > m.config.ProbeInterval {
-		metrics.IncrCounterWithLabels([]string{"memberlist", "degraded", "probe"}, 1, m.metricLabels)
+		m.metrics.counter(keyDegradedProbe, 1)
 	}
 
 	// Prepare a ping message and setup an ack handler.
@@ -349,7 +379,7 @@ func (m *Memberlist) probeNode(node *nodeState) {
 	}()
 	if node.State == StateAlive {
 		if err := m.encodeAndSendMsg(node.FullAddress(), pingMsg, &ping); err != nil {
-			m.logger.Printf("[ERR] memberlist: Failed to send UDP ping: %s", err)
+			m.logger.Error("failed to send UDP ping", "node", node.Name, "error", err)
 			if failedRemote(err) {
 				goto HANDLE_REMOTE_FAILURE
 			} else {
@@ -357,24 +387,11 @@ func (m *Memberlist) probeNode(node *nodeState) {
 			}
 		}
 	} else {
-		var msgs [][]byte
-		if buf, err := encode(pingMsg, &ping, m.config.MsgpackUseNewTimeFormat); err != nil {
-			m.logger.Printf("[ERR] memberlist: Failed to encode UDP ping message: %s", err)
-			return
-		} else {
-			msgs = append(msgs, buf.Bytes())
-		}
 		s := suspect{Incarnation: node.Incarnation, Node: node.Name, From: m.config.Name}
-		if buf, err := encode(suspectMsg, &s, m.config.MsgpackUseNewTimeFormat); err != nil {
-			m.logger.Printf("[ERR] memberlist: Failed to encode suspect message: %s", err)
-			return
-		} else {
-			msgs = append(msgs, buf.Bytes())
-		}
+		msgs := [][]byte{encode(pingMsg, ping), encode(suspectMsg, s)}
 
-		compound := makeCompoundMessage(msgs)
-		if err := m.rawSendMsgPacket(node.FullAddress(), &node.Node, compound.Bytes()); err != nil {
-			m.logger.Printf("[ERR] memberlist: Failed to send UDP compound ping and suspect message to %s: %s", addr, err)
+		if err := m.rawSendMsgPacket(node.FullAddress(), &node.Node, makeCompoundMessage(msgs)); err != nil {
+			m.logger.Error("failed to send UDP compound ping and suspect message", "node", node.Name, "addr", addr, "error", err)
 			if failedRemote(err) {
 				goto HANDLE_REMOTE_FAILURE
 			} else {
@@ -413,7 +430,7 @@ func (m *Memberlist) probeNode(node *nodeState) {
 		// probe interval it will give the TCP fallback more time, which
 		// is more active in dealing with lost packets, and it gives more
 		// time to wait for indirect acks/nacks.
-		m.logger.Printf("[DEBUG] memberlist: Failed UDP ping: %s (timeout reached)", node.Name)
+		m.logger.Debug("failed UDP ping: timeout reached", "node", node.Name)
 	}
 
 HANDLE_REMOTE_FAILURE:
@@ -446,7 +463,7 @@ HANDLE_REMOTE_FAILURE:
 		}
 
 		if err := m.encodeAndSendMsg(peer.FullAddress(), indirectPingMsg, &ind); err != nil {
-			m.logger.Printf("[ERR] memberlist: Failed to send indirect UDP ping: %s", err)
+			m.logger.Error("failed to send indirect UDP ping", "node", node.Name, "via", peer.Name, "error", err)
 		}
 	}
 
@@ -469,11 +486,9 @@ HANDLE_REMOTE_FAILURE:
 			defer close(fallbackCh)
 			didContact, err := m.sendPingAndWaitForAck(node.FullAddress(), ping, deadline)
 			if err != nil {
-				var to string
-				if ne, ok := err.(net.Error); ok && ne.Timeout() {
-					to = fmt.Sprintf("timeout %s: ", probeInterval)
-				}
-				m.logger.Printf("[ERR] memberlist: Failed fallback TCP ping: %s%s", to, err)
+				var ne net.Error
+				timeout := errors.As(err, &ne) && ne.Timeout()
+				m.logger.Error("failed fallback TCP ping", "node", node.Name, "timeout", timeout, "probe_interval", probeInterval, "error", err)
 			} else {
 				fallbackCh <- didContact
 			}
@@ -496,7 +511,7 @@ HANDLE_REMOTE_FAILURE:
 	// any additional time here.
 	for didContact := range fallbackCh {
 		if didContact {
-			m.logger.Printf("[WARN] memberlist: Was able to connect to %s over TCP but UDP probes failed, network may be misconfigured", node.Name)
+			m.logger.Warn("was able to connect over TCP but UDP probes failed, network may be misconfigured", "node", node.Name)
 			return
 		}
 	}
@@ -518,7 +533,7 @@ HANDLE_REMOTE_FAILURE:
 	}
 
 	// No acks received from target, suspect it as failed.
-	m.logger.Printf("[INFO] memberlist: Suspect %s has failed, no acks received", node.Name)
+	m.logger.Info("suspect has failed, no acks received", "node", node.Name)
 	s := suspect{Incarnation: node.Incarnation, Node: node.Name, From: m.config.Name}
 	m.suspectNode(&s)
 }
@@ -559,7 +574,7 @@ func (m *Memberlist) Ping(node string, addr net.Addr) (time.Duration, error) {
 		// Timeout, return an error below.
 	}
 
-	m.logger.Printf("[DEBUG] memberlist: Failed UDP ping: %v (timeout reached)", node)
+	m.logger.Debug("failed UDP ping: timeout reached", "node", node)
 	return 0, NoPingResponseError{ping.Node}
 }
 
@@ -591,7 +606,7 @@ func (m *Memberlist) resetNodes() {
 // gossip is invoked every GossipInterval period to broadcast our gossip
 // messages to a few random nodes.
 func (m *Memberlist) gossip() {
-	defer metrics.MeasureSinceWithLabels([]string{"memberlist", "gossip"}, time.Now(), m.metricLabels)
+	defer m.metrics.since(keyGossip, time.Now())
 
 	// Get some random live, suspect, or recently dead nodes
 	m.nodeLock.RLock()
@@ -631,14 +646,14 @@ func (m *Memberlist) gossip() {
 		if len(msgs) == 1 {
 			// Send single message as is
 			if err := m.rawSendMsgPacket(node.FullAddress(), &node, msgs[0]); err != nil {
-				m.logger.Printf("[ERR] memberlist: Failed to send gossip to %s: %s", addr, err)
+				m.logger.Error("failed to send gossip", "node", node.Name, "addr", addr, "error", err)
 			}
 		} else {
 			// Otherwise create and send one or more compound messages
 			compounds := makeCompoundMessages(msgs)
 			for _, compound := range compounds {
-				if err := m.rawSendMsgPacket(node.FullAddress(), &node, compound.Bytes()); err != nil {
-					m.logger.Printf("[ERR] memberlist: Failed to send gossip to %s: %s", addr, err)
+				if err := m.rawSendMsgPacket(node.FullAddress(), &node, compound); err != nil {
+					m.logger.Error("failed to send gossip", "node", node.Name, "addr", addr, "error", err)
 				}
 			}
 		}
@@ -679,7 +694,7 @@ func (m *Memberlist) pushPull() {
 	for _, node := range nodes {
 		wg.Go(func() {
 			if err := m.pushPullNode(node.FullAddress(), false); err != nil {
-				m.logger.Printf("[ERR] memberlist: Push/Pull with %s failed: %s", node.Name, err)
+				m.logger.Error("push/pull failed", "node", node.Name, "error", err)
 			}
 		})
 	}
@@ -688,7 +703,7 @@ func (m *Memberlist) pushPull() {
 
 // pushPullNode does a complete state exchange with a specific node.
 func (m *Memberlist) pushPullNode(a Address, join bool) error {
-	defer metrics.MeasureSinceWithLabels([]string{"memberlist", "pushPullNode"}, time.Now(), m.metricLabels)
+	defer m.metrics.since(keyPushPullNode, time.Now())
 
 	// Attempt to send and receive with the node
 	remote, userState, err := m.sendAndReceiveState(a, join)
@@ -727,8 +742,13 @@ func (m *Memberlist) verifyProtocol(remote []pushNodeState) error {
 	mindmax = math.MaxUint8
 
 	for _, rn := range remote {
+		vsn, ok := parseVsn(rn.Vsn)
+		if !ok {
+			return fmt.Errorf("Node '%s' sent a malformed protocol version vector (%d entries)", rn.Name, len(rn.Vsn))
+		}
+
 		// If the node isn't alive, then skip it
-		if rn.State != StateAlive {
+		if NodeStateType(rn.State) != StateAlive {
 			continue
 		}
 
@@ -738,21 +758,10 @@ func (m *Memberlist) verifyProtocol(remote []pushNodeState) error {
 			continue
 		}
 
-		if rn.Vsn[0] > maxpmin {
-			maxpmin = rn.Vsn[0]
-		}
-
-		if rn.Vsn[1] < minpmax {
-			minpmax = rn.Vsn[1]
-		}
-
-		if rn.Vsn[3] > maxdmin {
-			maxdmin = rn.Vsn[3]
-		}
-
-		if rn.Vsn[4] < mindmax {
-			mindmax = rn.Vsn[4]
-		}
+		maxpmin = max(maxpmin, vsn[0])
+		minpmax = min(minpmax, vsn[1])
+		maxdmin = max(maxdmin, vsn[3])
+		mindmax = min(mindmax, vsn[4])
 	}
 
 	for _, n := range m.nodes {
@@ -782,11 +791,9 @@ func (m *Memberlist) verifyProtocol(remote []pushNodeState) error {
 	// version that satisfies the whole cluster, we verify that every
 	// node in the cluster satisifies this.
 	for _, n := range remote {
-		var nPCur, nDCur uint8
-		if len(n.Vsn) > 0 {
-			nPCur = n.Vsn[2]
-			nDCur = n.Vsn[5]
-		}
+		// Validated by the first loop; an empty vector reads as zeros.
+		vsn, _ := parseVsn(n.Vsn)
+		nPCur, nDCur := vsn[2], vsn[5]
 
 		if nPCur < maxpmin || nPCur > minpmax {
 			return fmt.Errorf(
@@ -990,12 +997,17 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 		return
 	}
 
-	if len(a.Vsn) >= 3 {
-		pMin := a.Vsn[0]
-		pMax := a.Vsn[1]
-		pCur := a.Vsn[2]
+	vsn, vsnOK := parseVsn(a.Vsn)
+	if !vsnOK {
+		m.logger.Warn("ignoring alive message: malformed protocol version vector", "node", a.Node, "addr", net.IP(a.Addr), "port", a.Port, "vsn_entries", len(a.Vsn))
+		return
+	}
+	hasVsn := len(a.Vsn) > 0
+
+	if hasVsn {
+		pMin, pMax, pCur := vsn[0], vsn[1], vsn[2]
 		if pMin == 0 || pMax == 0 || pMin > pMax {
-			m.logger.Printf("[WARN] memberlist: Ignoring an alive message for '%s' (%v:%d) because protocol version(s) are wrong: %d <= %d <= %d should be >0", a.Node, net.IP(a.Addr), a.Port, pMin, pCur, pMax)
+			m.logger.Warn("ignoring alive message: protocol versions must satisfy 0 < pmin <= pmax", "node", a.Node, "addr", net.IP(a.Addr), "port", a.Port, "pmin", pMin, "pcur", pCur, "pmax", pMax)
 			return
 		}
 	}
@@ -1008,9 +1020,8 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 	// exists to filter REMOTE claims, and a blocking filter must not sit
 	// inside the lifecycle calls' ctx-bounded critical section.
 	if m.config.Alive != nil && !bootstrap {
-		if len(a.Vsn) < 6 {
-			m.logger.Printf("[WARN] memberlist: ignoring alive message for '%s' (%v:%d) because Vsn is not present",
-				a.Node, net.IP(a.Addr), a.Port)
+		if !hasVsn {
+			m.logger.Warn("ignoring alive message: protocol version vector is not present", "node", a.Node, "addr", net.IP(a.Addr), "port", a.Port)
 			return
 		}
 		node := &Node{
@@ -1018,18 +1029,12 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 			Addr: a.Addr,
 			Port: a.Port,
 			Meta: a.Meta,
-			PMin: a.Vsn[0],
-			PMax: a.Vsn[1],
-			PCur: a.Vsn[2],
-			DMin: a.Vsn[3],
-			DMax: a.Vsn[4],
-			DCur: a.Vsn[5],
 		}
+		node.setVersions(vsn)
 		var err error
 		m.runCallback(func() { err = m.config.Alive.NotifyAlive(node) })
 		if err != nil {
-			m.logger.Printf("[WARN] memberlist: ignoring alive message for '%s': %s",
-				a.Node, err)
+			m.logger.Warn("ignoring alive message: rejected by the alive delegate", "node", a.Node, "error", err)
 			return
 		}
 	}
@@ -1040,25 +1045,18 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 	if !ok {
 		errCon := m.config.IPAllowed(a.Addr)
 		if errCon != nil {
-			m.logger.Printf("[WARN] memberlist: Rejected node %s (%v): %s", a.Node, net.IP(a.Addr), errCon)
+			m.logger.Warn("rejected node", "node", a.Node, "addr", net.IP(a.Addr), "error", errCon)
 			return
 		}
 		state = &nodeState{
-			Node: Node{
-				Name: a.Node,
-				Addr: a.Addr,
-				Port: a.Port,
-				Meta: a.Meta,
-			},
+			Name:  a.Node,
+			Addr:  a.Addr,
+			Port:  a.Port,
+			Meta:  a.Meta,
 			State: StateDead,
 		}
-		if len(a.Vsn) > 5 {
-			state.PMin = a.Vsn[0]
-			state.PMax = a.Vsn[1]
-			state.PCur = a.Vsn[2]
-			state.DMin = a.Vsn[3]
-			state.DMax = a.Vsn[4]
-			state.DCur = a.Vsn[5]
+		if hasVsn {
+			state.setVersions(vsn)
 		}
 
 		// Add to map
@@ -1079,10 +1077,12 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 		m.numNodes.Add(1)
 	} else {
 		// Check if this address is different than the existing node unless the old node is dead.
-		if !bytes.Equal([]byte(state.Addr), a.Addr) || state.Port != a.Port {
+		// net.IP.Equal: the same IPv4 address may arrive in 4- or 16-byte
+		// form depending on how the peer obtained it.
+		if !state.Addr.Equal(a.Addr) || state.Port != a.Port {
 			errCon := m.config.IPAllowed(a.Addr)
 			if errCon != nil {
-				m.logger.Printf("[WARN] memberlist: Rejected IP update from %v to %v for node %s: %s", a.Node, state.Addr, net.IP(a.Addr), errCon)
+				m.logger.Warn("rejected address update", "node", a.Node, "old_addr", state.Addr, "new_addr", net.IP(a.Addr), "error", errCon)
 				return
 			}
 			// If DeadNodeReclaimTime is configured, check if enough time has elapsed since the node died.
@@ -1091,12 +1091,10 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 
 			// Allow the address to be updated if a dead node is being replaced.
 			if state.State == StateLeft || (state.State == StateDead && canReclaim) {
-				m.logger.Printf("[INFO] memberlist: Updating address for left or failed node %s from %v:%d to %v:%d",
-					state.Name, state.Addr, state.Port, net.IP(a.Addr), a.Port)
+				m.logger.Info("updating address for left or failed node", "node", state.Name, "old_addr", state.Addr, "old_port", state.Port, "new_addr", net.IP(a.Addr), "new_port", a.Port)
 				updatesNode = true
 			} else {
-				m.logger.Printf("[ERR] memberlist: Conflicting address for %s. Mine: %v:%d Theirs: %v:%d Old state: %v",
-					state.Name, state.Addr, state.Port, net.IP(a.Addr), a.Port, state.State)
+				m.logger.Error("conflicting address", "node", state.Name, "addr", state.Addr, "port", state.Port, "their_addr", net.IP(a.Addr), "their_port", a.Port, "state", state.State.metricsString())
 
 				// Inform the conflict delegate if provided
 				if m.config.Conflict != nil {
@@ -1134,10 +1132,7 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 	// If this is us we need to refute, otherwise re-broadcast
 	if !bootstrap && isLocalNode {
 		// Compute the version vector
-		versions := []uint8{
-			state.PMin, state.PMax, state.PCur,
-			state.DMin, state.DMax, state.DCur,
-		}
+		versions := state.versions()
 
 		// If the Incarnation is the same, we need special handling, since it
 		// possible for the following situation to happen:
@@ -1152,22 +1147,17 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 		//
 		if a.Incarnation == state.Incarnation &&
 			bytes.Equal(a.Meta, state.Meta) &&
-			bytes.Equal(a.Vsn, versions) {
+			hasVsn && vsn == versions {
 			return
 		}
 		m.refute(state, a.Incarnation)
-		m.logger.Printf("[WARN] memberlist: Refuting an alive message for '%s' (%v:%d) meta:(%v VS %v), vsn:(%v VS %v)", a.Node, net.IP(a.Addr), a.Port, a.Meta, state.Meta, a.Vsn, versions)
+		m.logger.Warn("refuting an alive message", "node", a.Node, "addr", net.IP(a.Addr), "port", a.Port, "meta", a.Meta, "local_meta", state.Meta, "vsn", a.Vsn, "local_vsn", versions[:])
 	} else {
 		m.encodeBroadcastNotify(a.Node, aliveMsg, a, notify)
 
 		// Update protocol versions if it arrived
-		if len(a.Vsn) > 0 {
-			state.PMin = a.Vsn[0]
-			state.PMax = a.Vsn[1]
-			state.PCur = a.Vsn[2]
-			state.DMin = a.Vsn[3]
-			state.DMax = a.Vsn[4]
-			state.DCur = a.Vsn[5]
+		if hasVsn {
+			state.setVersions(vsn)
 		}
 
 		// Update the state and incarnation number.
@@ -1187,7 +1177,7 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 	}
 
 	// Update metrics
-	metrics.IncrCounterWithLabels([]string{"memberlist", "msg", "alive"}, 1, m.metricLabels)
+	m.metrics.counter(keyMsgAlive, 1)
 
 	// Notify the delegate of any relevant updates
 	if m.config.Events != nil {
@@ -1244,14 +1234,14 @@ func (m *Memberlist) suspectNode(s *suspect) {
 	// If this is us we need to refute, otherwise re-broadcast
 	if state.Name == m.config.Name {
 		m.refute(state, s.Incarnation)
-		m.logger.Printf("[WARN] memberlist: Refuting a suspect message (from: %s)", s.From)
+		m.logger.Warn("refuting a suspect message", "from", s.From)
 		return // Do not mark ourself suspect
 	} else {
 		m.encodeAndBroadcast(s.Node, suspectMsg, s)
 	}
 
 	// Update metrics
-	metrics.IncrCounterWithLabels([]string{"memberlist", "msg", "suspect"}, 1, m.metricLabels)
+	m.metrics.counter(keyMsgSuspect, 1)
 
 	// Update the state
 	state.Incarnation = s.Incarnation
@@ -1297,11 +1287,10 @@ func (m *Memberlist) suspectNode(s *suspect) {
 		}
 
 		if k > 0 && numConfirmations < k {
-			metrics.IncrCounterWithLabels([]string{"memberlist", "degraded", "timeout"}, 1, m.metricLabels)
+			m.metrics.counter(keyDegradedTimeout, 1)
 		}
 
-		m.logger.Printf("[INFO] memberlist: Marking %s as failed, suspect timeout reached (%d peer confirmations)",
-			state.Name, numConfirmations)
+		m.logger.Info("marking node as failed, suspect timeout reached", "node", state.Name, "confirmations", numConfirmations)
 
 		d := &dead{Incarnation: state.Incarnation, Node: state.Name, From: m.config.Name}
 		m.deadNodeLocked(d, nil)
@@ -1352,7 +1341,7 @@ func (m *Memberlist) deadNodeLocked(d *dead, receipt *eventReceipt) {
 		// If we are not leaving we need to refute
 		if !m.hasLeft() {
 			m.refute(state, d.Incarnation)
-			m.logger.Printf("[WARN] memberlist: Refuting a dead message (from: %s)", d.From)
+			m.logger.Warn("refuting a dead message", "from", d.From)
 			return // Do not mark ourself dead
 		}
 
@@ -1363,7 +1352,7 @@ func (m *Memberlist) deadNodeLocked(d *dead, receipt *eventReceipt) {
 	}
 
 	// Update metrics
-	metrics.IncrCounterWithLabels([]string{"memberlist", "msg", "dead"}, 1, m.metricLabels)
+	m.metrics.counter(keyMsgDead, 1)
 
 	// Update the state
 	state.Incarnation = d.Incarnation
@@ -1387,7 +1376,7 @@ func (m *Memberlist) deadNodeLocked(d *dead, receipt *eventReceipt) {
 // state transfer
 func (m *Memberlist) mergeState(remote []pushNodeState) {
 	for _, r := range remote {
-		switch r.State {
+		switch NodeStateType(r.State) {
 		case StateAlive:
 			a := alive{
 				Incarnation: r.Incarnation,

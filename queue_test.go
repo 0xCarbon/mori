@@ -4,10 +4,9 @@
 package mori
 
 import (
+	"math/rand/v2"
+	"slices"
 	"testing"
-
-	"github.com/google/btree"
-	"github.com/stretchr/testify/require"
 )
 
 // for testing only
@@ -50,25 +49,96 @@ func TestLimitedBroadcastLess(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
 			a, b := c.A, c.B
+			if !a.less(b) || b.less(a) {
+				t.Fatalf("less(%+v, %+v) is not a strict order", a, b)
+			}
 
-			require.True(t, a.Less(b))
-
-			tree := btree.New(32)
-
-			tree.ReplaceOrInsert(b)
-			tree.ReplaceOrInsert(a)
-
-			min := tree.Min().(*limitedBroadcast)
-			require.Equal(t, a.transmits, min.transmits)
-			require.Equal(t, a.msgLen, min.msgLen)
-			require.Equal(t, a.id, min.id)
-
-			max := tree.Max().(*limitedBroadcast)
-			require.Equal(t, b.transmits, max.transmits)
-			require.Equal(t, b.msgLen, max.msgLen)
-			require.Equal(t, b.id, max.id)
+			var root *limitedBroadcast
+			b.prio, a.prio = 2, 1
+			root = treapInsert(root, b)
+			root = treapInsert(root, a)
+			if got := treapMin(root); got != a {
+				t.Fatalf("min = %+v, want %+v", got, a)
+			}
+			if got := treapMax(root); got != b {
+				t.Fatalf("max = %+v, want %+v", got, b)
+			}
 		})
 	}
+}
+
+// TestTreapMatchesSortedOracle drives the intrusive treap with random
+// inserts and deletes and checks traversal, bounds and seeks against a
+// sorted slice after every operation.
+func TestTreapMatchesSortedOracle(t *testing.T) {
+	r := rand.New(rand.NewPCG(1, 2))
+	var root *limitedBroadcast
+	var oracle []*limitedBroadcast
+	nextID := int64(0)
+	for step := range 20_000 {
+		if len(oracle) == 0 || r.IntN(3) != 0 {
+			nextID++
+			x := &limitedBroadcast{transmits: r.IntN(4), msgLen: int64(r.IntN(8)), id: nextID, prio: r.Uint64()}
+			root = treapInsert(root, x)
+			i, _ := slices.BinarySearchFunc(oracle, x, cmpBroadcast)
+			oracle = slices.Insert(oracle, i, x)
+		} else {
+			i := r.IntN(len(oracle))
+			root = treapDelete(root, oracle[i])
+			oracle = slices.Delete(oracle, i, i+1)
+		}
+
+		if step%97 != 0 {
+			continue
+		}
+		var got []*limitedBroadcast
+		ascendFrom(root, nil, func(x *limitedBroadcast) bool { got = append(got, x); return true })
+		if !slices.Equal(got, oracle) {
+			t.Fatalf("step %d: ascending traversal differs from the oracle", step)
+		}
+		got = got[:0]
+		descend(root, func(x *limitedBroadcast) bool { got = append(got, x); return true })
+		slices.Reverse(got)
+		if !slices.Equal(got, oracle) {
+			t.Fatalf("step %d: descending traversal differs from the oracle", step)
+		}
+		if len(oracle) > 0 && (treapMin(root) != oracle[0] || treapMax(root) != oracle[len(oracle)-1]) {
+			t.Fatalf("step %d: min/max differ from the oracle", step)
+		}
+		k := &limitedBroadcast{transmits: r.IntN(5), msgLen: int64(r.IntN(9)), id: r.Int64N(nextID + 2)}
+		i, _ := slices.BinarySearchFunc(oracle, k, cmpBroadcast)
+		got = got[:0]
+		ascendFrom(root, k, func(x *limitedBroadcast) bool { got = append(got, x); return true })
+		if !slices.Equal(got, oracle[i:]) {
+			t.Fatalf("step %d: ascendFrom(%+v) differs from the oracle", step, k)
+		}
+		var ceil *limitedBroadcast
+		if i < len(oracle) {
+			ceil = oracle[i]
+		}
+		if got := treapCeil(root, k); got != ceil {
+			t.Fatalf("step %d: treapCeil(%+v) = %+v, want %+v", step, k, got, ceil)
+		}
+		for j, x := range oracle {
+			var next *limitedBroadcast
+			if j+1 < len(oracle) {
+				next = oracle[j+1]
+			}
+			if got := treapNext(root, x); got != next {
+				t.Fatalf("step %d: treapNext(%+v) = %+v, want %+v", step, x, got, next)
+			}
+		}
+	}
+}
+
+func cmpBroadcast(a, b *limitedBroadcast) int {
+	switch {
+	case a.less(b):
+		return -1
+	case b.less(a):
+		return 1
+	}
+	return 0
 }
 
 func TestTransmitLimited_Queue(t *testing.T) {
@@ -120,18 +190,18 @@ func TestTransmitLimited_GetBroadcasts(t *testing.T) {
 
 	// 2 byte overhead per message, should get all 4 messages
 	all := q.GetBroadcasts(2, 80)
-	require.Equal(t, 4, len(all), "missing messages: %v", prettyPrintMessages(all))
+	equal(t, 4, len(all), "missing messages: %v", prettyPrintMessages(all))
 
 	// 3 byte overhead, should only get 3 messages back
 	partial := q.GetBroadcasts(3, 80)
-	require.Equal(t, 3, len(partial), "missing messages: %v", prettyPrintMessages(partial))
+	equal(t, 3, len(partial), "missing messages: %v", prettyPrintMessages(partial))
 }
 
 func TestTransmitLimited_GetBroadcasts_Limit(t *testing.T) {
 	q := &TransmitLimitedQueue{RetransmitMult: 1, NumNodes: func() int { return 10 }}
 
-	require.Equal(t, int64(0), q.idGen, "the id generator seed starts at zero")
-	require.Equal(t, 2, retransmitLimit(q.RetransmitMult, q.NumNodes()), "sanity check transmit limits")
+	equal(t, int64(0), q.idGen, "the id generator seed starts at zero")
+	equal(t, 2, retransmitLimit(q.RetransmitMult, q.NumNodes()), "sanity check transmit limits")
 
 	// 18 bytes per message
 	q.QueueBroadcast(&memberlistBroadcast{"test", []byte("1. this is a test."), nil})
@@ -139,30 +209,30 @@ func TestTransmitLimited_GetBroadcasts_Limit(t *testing.T) {
 	q.QueueBroadcast(&memberlistBroadcast{"bar", []byte("3. this is a test."), nil})
 	q.QueueBroadcast(&memberlistBroadcast{"baz", []byte("4. this is a test."), nil})
 
-	require.Equal(t, int64(4), q.idGen, "we handed out 4 IDs")
+	equal(t, int64(4), q.idGen, "we handed out 4 IDs")
 
 	// 3 byte overhead, should only get 3 messages back
 	partial1 := q.GetBroadcasts(3, 80)
-	require.Equal(t, 3, len(partial1), "missing messages: %v", prettyPrintMessages(partial1))
+	equal(t, 3, len(partial1), "missing messages: %v", prettyPrintMessages(partial1))
 
-	require.Equal(t, int64(4), q.idGen, "id generator doesn't reset until empty")
+	equal(t, int64(4), q.idGen, "id generator never rewinds")
 
 	partial2 := q.GetBroadcasts(3, 80)
-	require.Equal(t, 3, len(partial2), "missing messages: %v", prettyPrintMessages(partial2))
+	equal(t, 3, len(partial2), "missing messages: %v", prettyPrintMessages(partial2))
 
-	require.Equal(t, int64(4), q.idGen, "id generator doesn't reset until empty")
+	equal(t, int64(4), q.idGen, "id generator never rewinds")
 
 	// Only two not expired
 	partial3 := q.GetBroadcasts(3, 80)
-	require.Equal(t, 2, len(partial3), "missing messages: %v", prettyPrintMessages(partial3))
+	equal(t, 2, len(partial3), "missing messages: %v", prettyPrintMessages(partial3))
 
-	require.Equal(t, int64(0), q.idGen, "id generator resets on empty")
+	equal(t, int64(4), q.idGen, "id generator never rewinds, even when the queue empties")
 
 	// Should get nothing
 	partial5 := q.GetBroadcasts(3, 80)
-	require.Equal(t, 0, len(partial5), "missing messages: %v", prettyPrintMessages(partial5))
+	equal(t, 0, len(partial5), "missing messages: %v", prettyPrintMessages(partial5))
 
-	require.Equal(t, int64(0), q.idGen, "id generator resets on empty")
+	equal(t, int64(4), q.idGen, "id generator never rewinds, even when the queue empties")
 }
 
 func prettyPrintMessages(msgs [][]byte) []string {
@@ -188,7 +258,7 @@ func TestTransmitLimited_Prune(t *testing.T) {
 	// Keep only 2
 	q.Prune(2)
 
-	require.Equal(t, 2, q.NumQueued())
+	equal(t, 2, q.NumQueued())
 
 	// Should notify the first two
 	select {
@@ -241,5 +311,32 @@ func TestTransmitLimited_ordering(t *testing.T) {
 	}
 	if dump[4].transmits != 0 {
 		t.Fatalf("bad val %v, %d", dump[4].b.(*memberlistBroadcast).node, dump[4].transmits)
+	}
+}
+
+// TestQueueIDsStayUniqueAcrossDrain: GetBroadcasts removes every entry it
+// sends and re-queues it afterwards, so the queue can be momentarily empty
+// while entries are still pending re-insertion. Resetting the id generator
+// at that moment let a new broadcast reuse a pending entry's id; with equal
+// keys the ordered set replaced the older entry, dropping it without
+// Finished ever being called.
+func TestQueueIDsStayUniqueAcrossDrain(t *testing.T) {
+	q := &TransmitLimitedQueue{RetransmitMult: 10, NumNodes: func() int { return 10 }}
+	aDone := make(chan struct{}, 1)
+	q.QueueBroadcast(&memberlistBroadcast{"a", []byte("12345"), aDone})
+	if got := q.GetBroadcasts(0, 100); len(got) != 1 {
+		t.Fatalf("first drain sent %d messages, want 1", len(got))
+	}
+	q.QueueBroadcast(&memberlistBroadcast{"b", []byte("67890"), nil})
+	if got := q.GetBroadcasts(0, 5); len(got) != 1 {
+		t.Fatalf("second drain sent %d messages, want 1", len(got))
+	}
+	if n := q.NumQueued(); n != 2 {
+		select {
+		case <-aDone:
+			t.Fatalf("queue holds %d entries, want 2: broadcast a was dropped and finished early", n)
+		default:
+			t.Fatalf("queue holds %d entries, want 2: broadcast a was dropped without Finished", n)
+		}
 	}
 }

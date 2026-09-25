@@ -10,16 +10,17 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/hashicorp/go-msgpack/v2/codec"
-	"github.com/sean-/seed"
+	"github.com/0xCarbon/mori/internal/msgpack"
+	"github.com/0xCarbon/mori/internal/wire"
 )
 
 // goid returns the current goroutine's id, parsed from the runtime stack
@@ -51,36 +52,28 @@ const (
 	lzwLitWidth = 8
 )
 
-func init() {
-	_, _ = seed.Init()
+// messageDecoder is implemented by pointers to wire messages.
+type messageDecoder interface {
+	DecodeMsgpack(*msgpack.Decoder) error
 }
 
-// Decode reverses the encode operation on a byte slice input
-func decode(buf []byte, out any) error {
-	r := bytes.NewReader(buf)
-	hd := codec.MsgpackHandle{}
-	dec := codec.NewDecoder(r, &hd)
-	return dec.Decode(out)
+// decode reverses encode's MessagePack part on a byte slice.
+func decode(buf []byte, out messageDecoder) error {
+	return out.DecodeMsgpack(msgpack.NewDecoder(buf))
 }
 
-// Encode writes an encoded object to a new bytes buffer
-func encode(msgType messageType, in any, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
-	buf := bytes.NewBuffer(nil)
-	buf.WriteByte(uint8(msgType))
-	hd := codec.MsgpackHandle{}
-	hd.TimeNotBuiltin = !msgpackUseNewTimeFormat
-
-	enc := codec.NewEncoder(buf, &hd)
-	err := enc.Encode(in)
-	return buf, err
+// encode returns the message type byte followed by msg's encoding.
+func encode(msgType messageType, msg wire.Message) []byte {
+	return msg.AppendMsgpack(append(make([]byte, 0, 64), byte(msgType)))
 }
 
-// Returns a random offset between 0 and n
+// randomOffset returns a uniformly random offset in [0, n), or 0 when n is
+// not positive.
 func randomOffset(n int) int {
-	if n == 0 {
+	if n <= 0 {
 		return 0
 	}
-	return int(rand.Uint32() % uint32(n))
+	return rand.IntN(n)
 }
 
 // suspicionTimeout computes the timeout that should be used when
@@ -193,42 +186,35 @@ OUTER:
 // makeCompoundMessages takes a list of messages and packs
 // them into one or multiple messages based on the limitations
 // of compound messages (255 messages each).
-func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
+func makeCompoundMessages(msgs [][]byte) [][]byte {
 	const maxMsgs = 255
-	bufs := make([]*bytes.Buffer, 0, (len(msgs)+(maxMsgs-1))/maxMsgs)
+	out := make([][]byte, 0, (len(msgs)+(maxMsgs-1))/maxMsgs)
 
 	for ; len(msgs) > maxMsgs; msgs = msgs[maxMsgs:] {
-		bufs = append(bufs, makeCompoundMessage(msgs[:maxMsgs]))
+		out = append(out, makeCompoundMessage(msgs[:maxMsgs]))
 	}
 	if len(msgs) > 0 {
-		bufs = append(bufs, makeCompoundMessage(msgs))
+		out = append(out, makeCompoundMessage(msgs))
 	}
-
-	return bufs
+	return out
 }
 
 // makeCompoundMessage takes a list of messages and generates
-// a single compound message containing all of them
-func makeCompoundMessage(msgs [][]byte) *bytes.Buffer {
-	// Create a local buffer
-	buf := bytes.NewBuffer(nil)
-
-	// Write out the type
-	buf.WriteByte(uint8(compoundMsg))
-
-	// Write out the number of message
-	buf.WriteByte(uint8(len(msgs)))
-
-	// Add the message lengths
+// a single compound message containing all of them: the type, the part
+// count, a big-endian uint16 length per part, then the parts.
+func makeCompoundMessage(msgs [][]byte) []byte {
+	size := 2 + 2*len(msgs)
 	for _, m := range msgs {
-		_ = binary.Write(buf, binary.BigEndian, uint16(len(m)))
+		size += len(m)
 	}
-
-	// Append the messages
+	buf := make([]byte, 0, size)
+	buf = append(buf, uint8(compoundMsg), uint8(len(msgs)))
 	for _, m := range msgs {
-		buf.Write(m)
+		buf = binary.BigEndian.AppendUint16(buf, uint16(len(m)))
 	}
-
+	for _, m := range msgs {
+		buf = append(buf, m...)
+	}
 	return buf
 }
 
@@ -271,28 +257,61 @@ func decodeCompoundMessage(buf []byte) (trunc int, parts [][]byte, err error) {
 	return
 }
 
+// maxIncompressiblePacket is the largest message LZW compression can never
+// shrink, so rawSendMsgPacket skips compressing it: its result would be
+// discarded anyway. Bound: the i-th LZW code covers at most i bytes, so n
+// bytes need k codes with k(k+1)/2 >= n, each 9 bits wide plus a 9-bit end
+// code, inside a 13-byte compress envelope (type, map header, "Algo",
+// algorithm, "Buf", string header): 13 + ceil(9(k+1)/8) >= n for n <= 22.
+const maxIncompressiblePacket = 22
+
+// LZW coders are pooled: each allocates tables of tens of kilobytes, which
+// used to dominate the cost of sending a compressed packet. Before a coder
+// returns to the pool it is pointed at an empty source or sink, so an idle
+// coder never keeps a message buffer alive.
+var (
+	lzwWriters = sync.Pool{New: func() any { return lzw.NewWriter(lzwIdleSink, lzw.LSB, lzwLitWidth) }}
+	lzwReaders = sync.Pool{New: func() any { return lzw.NewReader(lzwIdleSource, lzw.LSB, lzwLitWidth) }}
+
+	// Idle coders point here. Shared safely: a coder only touches its
+	// source or sink between Get and Put, after another Reset.
+	lzwIdleSink   = &lzwBuffer{}
+	lzwIdleSource = bytes.NewReader(nil)
+)
+
+// lzwBuffer is a bytes.Buffer with the Flush method lzw.Writer looks for;
+// without it the writer wraps its destination in a new 4 KiB bufio.Writer
+// on every Reset.
+type lzwBuffer struct{ bytes.Buffer }
+
+func (*lzwBuffer) Flush() error { return nil }
+
 // compressPayload takes an opaque input buffer, compresses it
 // and wraps it in a compress{} message that is encoded.
-func compressPayload(inp []byte, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
-	var buf bytes.Buffer
-	compressor := lzw.NewWriter(&buf, lzw.LSB, lzwLitWidth)
+func compressPayload(inp []byte) ([]byte, error) {
+	var buf lzwBuffer
+	buf.Grow(len(inp)/2 + 16)
+	w := lzwWriters.Get().(*lzw.Writer)
+	w.Reset(&buf, lzw.LSB, lzwLitWidth)
+	defer func() {
+		w.Reset(lzwIdleSink, lzw.LSB, lzwLitWidth)
+		lzwWriters.Put(w)
+	}()
 
-	_, err := compressor.Write(inp)
-	if err != nil {
+	if _, err := w.Write(inp); err != nil {
 		return nil, err
 	}
-
 	// Ensure we flush everything out
-	if err := compressor.Close(); err != nil {
+	if err := w.Close(); err != nil {
 		return nil, err
 	}
 
 	// Create a compressed message
 	c := compress{
-		Algo: lzwAlgo,
+		Algo: uint8(lzwAlgo),
 		Buf:  buf.Bytes(),
 	}
-	return encode(compressMsg, &c, msgpackUseNewTimeFormat)
+	return encode(compressMsg, c), nil
 }
 
 // decompressPayload is used to unpack an encoded compress{}
@@ -303,32 +322,50 @@ func decompressPayload(msg []byte) ([]byte, error) {
 	if err := decode(msg, &c); err != nil {
 		return nil, err
 	}
-	return decompressBuffer(&c)
+	return decompressBuffer(&c, maxPacketDecompressedBytes)
 }
 
 // decompressBuffer is used to decompress the buffer of
-// a single compress message, handling multiple algorithms
-func decompressBuffer(c *compress) ([]byte, error) {
+// a single compress message, handling multiple algorithms. The output may
+// not exceed limit bytes.
+func decompressBuffer(c *compress, limit int) ([]byte, error) {
 	// Verify the algorithm
-	if c.Algo != lzwAlgo {
+	if compressionType(c.Algo) != lzwAlgo {
 		return nil, fmt.Errorf("cannot decompress unknown algorithm %d", c.Algo)
 	}
 
-	// Create a uncompressor
-	uncomp := lzw.NewReader(bytes.NewReader(c.Buf), lzw.LSB, lzwLitWidth)
+	r := lzwReaders.Get().(*lzw.Reader)
+	r.Reset(bytes.NewReader(c.Buf), lzw.LSB, lzwLitWidth)
 	defer func() {
-		_ = uncomp.Close()
+		_ = r.Close()
+		r.Reset(lzwIdleSource, lzw.LSB, lzwLitWidth)
+		lzwReaders.Put(r)
 	}()
 
-	// Read all the data
-	var b bytes.Buffer
-	_, err := io.Copy(&b, uncomp)
-	if err != nil {
-		return nil, err
+	// Read into a buffer sized from the input and grown as needed, never
+	// past one byte beyond the limit, so an oversized payload is detected
+	// without being materialized.
+	out := make([]byte, 0, min(4*len(c.Buf)+64, limit+1))
+	for {
+		if len(out) == cap(out) {
+			if len(out) > limit {
+				return nil, fmt.Errorf("decompressed message is larger than limit (%d)", limit)
+			}
+			out = slices.Grow(out, min(cap(out), limit+1-len(out)))
+		}
+		n, err := r.Read(out[len(out):cap(out)])
+		out = out[:len(out)+n]
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
-
-	// Return the uncompressed bytes
-	return b.Bytes(), nil
+	if len(out) > limit {
+		return nil, fmt.Errorf("decompressed message is larger than limit (%d)", limit)
+	}
+	return out, nil
 }
 
 // joinHostPort returns the host:port form of an address, for use with a

@@ -5,8 +5,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/require"
 )
 
 // limitRecordingDelegate records the limit passed to NodeMeta and returns a
@@ -30,15 +28,15 @@ func TestMetaMaxSize_ZeroMeansDefault(t *testing.T) {
 	d := &limitRecordingDelegate{meta: []byte("ok")}
 
 	m := GetMemberlist(t, func(c *Config) { c.Delegate = d })
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
-	require.Equal(t, int64(MetaMaxSize), d.lastLimit.Load(),
+	equal(t, int64(MetaMaxSize), d.lastLimit.Load(),
 		"delegate must be offered the default limit when MetaMaxSize is 0")
 
 	// Over the default cap still errors.
 	d.meta = make([]byte, MetaMaxSize+1)
-	require.ErrorIs(t, m.UpdateNode(time.Second), ErrMetaTooLarge)
+	errIs(t, m.UpdateNode(time.Second), ErrMetaTooLarge)
 }
 
 func TestMetaMaxSize_KnobRaisesTheCap(t *testing.T) {
@@ -48,19 +46,19 @@ func TestMetaMaxSize_KnobRaisesTheCap(t *testing.T) {
 		c.Delegate = d
 		c.MetaMaxSize = 1024
 	})
-	require.NoError(t, m.setAlive(nil), "700 B meta must be accepted with a 1024 B cap")
+	noErr(t, m.setAlive(nil), "700 B meta must be accepted with a 1024 B cap")
 	defer func() { _ = m.Shutdown() }()
 
-	require.Equal(t, int64(1024), d.lastLimit.Load(),
+	equal(t, int64(1024), d.lastLimit.Load(),
 		"delegate must be offered the configured limit")
 
 	// Above the configured cap still errors.
 	d.meta = make([]byte, 1025)
-	require.ErrorIs(t, m.UpdateNode(time.Second), ErrMetaTooLarge)
+	errIs(t, m.UpdateNode(time.Second), ErrMetaTooLarge)
 
 	// Back under the cap works again.
 	d.meta = make([]byte, 1000)
-	require.NoError(t, m.UpdateNode(time.Second))
+	noErr(t, m.UpdateNode(time.Second))
 }
 
 func TestCreate_MetaMaxSizeExceedsTransportBudget(t *testing.T) {
@@ -77,9 +75,9 @@ func TestCreate_MetaMaxSizeExceedsTransportBudget(t *testing.T) {
 	if m != nil {
 		defer func() { _ = m.Shutdown() }()
 	}
-	require.Error(t, err)
-	require.Nil(t, m)
-	require.Contains(t, err.Error(), "MetaMaxSize")
+	isErr(t, err)
+	isNil(t, m)
+	contains(t, err.Error(), "MetaMaxSize")
 }
 
 func TestCreate_AbsurdMetaMaxSize_FailsWithoutAllocating(t *testing.T) {
@@ -93,9 +91,9 @@ func TestCreate_AbsurdMetaMaxSize_FailsWithoutAllocating(t *testing.T) {
 	if m != nil {
 		defer func() { _ = m.Shutdown() }()
 	}
-	require.Error(t, err)
-	require.Nil(t, m)
-	require.Contains(t, err.Error(), "MetaMaxSize")
+	isErr(t, err)
+	isNil(t, m)
+	contains(t, err.Error(), "MetaMaxSize")
 }
 
 // smallPacketTransport advertises a tiny MaxPacketSize.
@@ -118,9 +116,9 @@ func TestCreate_TransportMaxPacketSizeConstrains(t *testing.T) {
 	if m != nil {
 		defer func() { _ = m.Shutdown() }()
 	}
-	require.Error(t, err)
-	require.Nil(t, m)
-	require.Contains(t, err.Error(), "MetaMaxSize")
+	isErr(t, err)
+	isNil(t, m)
+	contains(t, err.Error(), "MetaMaxSize")
 }
 
 // TestMetaMaxSize_CrossConfigConvergence: a producer with a raised cap must
@@ -150,7 +148,7 @@ func TestMetaMaxSize_CrossConfigConvergence(t *testing.T) {
 		c.MetaMaxSize = 2048
 	})
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() { _ = m1.Shutdown() }()
 
 	// Receivers stay on the default MetaMaxSize.
@@ -158,12 +156,12 @@ func TestMetaMaxSize_CrossConfigConvergence(t *testing.T) {
 	for range 2 {
 		c := newConfig(func(c *Config) { c.BindPort = m1.config.BindPort })
 		m, err := Create(c)
-		require.NoError(t, err)
+		noErr(t, err)
 		defer func() { _ = m.Shutdown() }()
 
 		n, err := m.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
-		require.NoError(t, err)
-		require.GreaterOrEqual(t, n, 1)
+		noErr(t, err)
+		greaterOrEqual(t, n, 1)
 		receivers = append(receivers, m)
 	}
 

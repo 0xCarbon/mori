@@ -5,6 +5,7 @@ package mori
 
 import (
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -32,6 +33,10 @@ func TestSuspicion_remainingSuspicionTime(t *testing.T) {
 	}
 }
 
+// TestSuspicion_Timer runs in a synctest bubble, so time is exact: each
+// case checks that the timer fires at precisely the timeout derived by
+// hand from the Lifeguard formula (max - log(n+1)/log(k+1) * (max - min),
+// floored to the millisecond), not earlier, and never again.
 func TestSuspicion_Timer(t *testing.T) {
 	const k = 3
 	const min = 500 * time.Millisecond
@@ -47,155 +52,109 @@ func TestSuspicion_Timer(t *testing.T) {
 		confirmations    []pair
 		expected         time.Duration
 	}{
-		{
-			0,
-			"me",
-			[]pair{},
-			max,
-		},
-		{
-			1,
-			"me",
-			[]pair{
-				pair{"me", false},
-				pair{"foo", true},
-			},
-			1250 * time.Millisecond,
-		},
-		{
-			1,
-			"me",
-			[]pair{
-				pair{"me", false},
-				pair{"foo", true},
-				pair{"foo", false},
-				pair{"foo", false},
-			},
-			1250 * time.Millisecond,
-		},
-		{
-			2,
-			"me",
-			[]pair{
-				pair{"me", false},
-				pair{"foo", true},
-				pair{"bar", true},
-			},
-			810 * time.Millisecond,
-		},
-		{
-			3,
-			"me",
-			[]pair{
-				pair{"me", false},
-				pair{"foo", true},
-				pair{"bar", true},
-				pair{"baz", true},
-			},
-			min,
-		},
-		{
-			3,
-			"me",
-			[]pair{
-				pair{"me", false},
-				pair{"foo", true},
-				pair{"bar", true},
-				pair{"baz", true},
-				pair{"zoo", false},
-			},
-			min,
-		},
+		{0, "me", []pair{}, max},
+		// n=1: 2000 - log(2)/log(4)*1500 = 1250ms.
+		{1, "me", []pair{{"me", false}, {"foo", true}}, 1250 * time.Millisecond},
+		{1, "me", []pair{{"me", false}, {"foo", true}, {"foo", false}, {"foo", false}}, 1250 * time.Millisecond},
+		// n=2: 2000 - log(3)/log(4)*1500 = 811.28ms, floored to 811ms.
+		{2, "me", []pair{{"me", false}, {"foo", true}, {"bar", true}}, 811 * time.Millisecond},
+		// n=k: the minimum.
+		{3, "me", []pair{{"me", false}, {"foo", true}, {"bar", true}, {"baz", true}}, min},
+		{3, "me", []pair{{"me", false}, {"foo", true}, {"bar", true}, {"baz", true}, {"zoo", false}}, min},
 	}
 	for i, c := range cases {
-		ch := make(chan time.Duration, 1)
-		start := time.Now()
-		f := func(numConfirmations int) {
-			if numConfirmations != c.numConfirmations {
-				t.Errorf("case %d: bad %d != %d", i, numConfirmations, c.numConfirmations)
+		synctest.Test(t, func(t *testing.T) {
+			ch := make(chan time.Duration, 1)
+			start := time.Now()
+			f := func(numConfirmations int) {
+				if numConfirmations != c.numConfirmations {
+					t.Errorf("case %d: bad %d != %d", i, numConfirmations, c.numConfirmations)
+				}
+				ch <- time.Since(start)
 			}
 
-			ch <- time.Since(start)
-		}
-
-		// Create the timer and add the requested confirmations. Wait
-		// the fudge amount to help make sure we calculate the timeout
-		// overall, and don't accumulate extra time.
-		s := newSuspicion(c.from, k, min, max, f)
-		fudge := 25 * time.Millisecond
-		for _, p := range c.confirmations {
-			time.Sleep(fudge)
-			if s.Confirm(p.from) != p.newInfo {
-				t.Fatalf("case %d: newInfo mismatch for %s", i, p.from)
+			// Create the timer and add the requested confirmations, spaced
+			// out so the elapsed time is part of every recomputation.
+			s := newSuspicion(c.from, k, min, max, f)
+			const step = 25 * time.Millisecond
+			for _, p := range c.confirmations {
+				time.Sleep(step)
+				if s.Confirm(p.from) != p.newInfo {
+					t.Fatalf("case %d: newInfo mismatch for %s", i, p.from)
+				}
 			}
-		}
 
-		// Wait until right before the timeout and make sure the
-		// timer hasn't fired.
-		already := time.Duration(len(c.confirmations)) * fudge
-		time.Sleep(c.expected - already - fudge)
-		select {
-		case d := <-ch:
-			t.Fatalf("case %d: should not have fired (%9.6f)", i, d.Seconds())
-		default:
-		}
+			// One nanosecond before the timeout it has not fired.
+			time.Sleep(c.expected - time.Since(start) - time.Nanosecond)
+			synctest.Wait()
+			select {
+			case d := <-ch:
+				t.Fatalf("case %d: fired early at %v, want %v", i, d, c.expected)
+			default:
+			}
 
-		// Wait through the timeout and a little after and make sure it
-		// fires.
-		time.Sleep(2 * fudge)
-		select {
-		case <-ch:
-		default:
-			t.Fatalf("case %d: should have fired", i)
-		}
+			// At the timeout it fires, exactly then.
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			select {
+			case d := <-ch:
+				if d != c.expected {
+					t.Fatalf("case %d: fired at %v, want %v", i, d, c.expected)
+				}
+			default:
+				t.Fatalf("case %d: did not fire at %v", i, c.expected)
+			}
 
-		// Confirm after to make sure it handles a negative remaining
-		// time correctly and doesn't fire again.
-		s.Confirm("late")
-		time.Sleep(c.expected + 2*fudge)
-		select {
-		case d := <-ch:
-			t.Fatalf("case %d: should not have fired (%9.6f)", i, d.Seconds())
-		default:
-		}
+			// A late confirmation (negative remaining time) must not fire
+			// it again.
+			s.Confirm("late")
+			time.Sleep(c.expected)
+			synctest.Wait()
+			select {
+			case d := <-ch:
+				t.Fatalf("case %d: fired again at %v", i, d)
+			default:
+			}
+		})
 	}
 }
 
 func TestSuspicion_Timer_ZeroK(t *testing.T) {
-	ch := make(chan struct{}, 1)
-	f := func(int) {
-		ch <- struct{}{}
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ch := make(chan time.Duration, 1)
+		start := time.Now()
+		f := func(int) { ch <- time.Since(start) }
 
-	// This should select the min time since there are no expected
-	// confirmations to accelerate the timer.
-	s := newSuspicion("me", 0, 25*time.Millisecond, 30*time.Second, f)
-	if s.Confirm("foo") {
-		t.Fatalf("should not provide new information")
-	}
-
-	select {
-	case <-ch:
-	case <-time.After(50 * time.Millisecond):
-		t.Fatalf("should have fired")
-	}
+		// With no expected confirmations the timer uses the minimum.
+		s := newSuspicion("me", 0, 25*time.Millisecond, 30*time.Second, f)
+		if s.Confirm("foo") {
+			t.Fatalf("should not provide new information")
+		}
+		if d := <-ch; d != 25*time.Millisecond {
+			t.Fatalf("fired at %v, want 25ms", d)
+		}
+	})
 }
 
 func TestSuspicion_Timer_Immediate(t *testing.T) {
-	ch := make(chan struct{}, 1)
-	f := func(int) {
-		ch <- struct{}{}
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ch := make(chan time.Duration, 1)
+		start := time.Now()
+		f := func(int) { ch <- time.Since(start) }
 
-	// This should underflow the timeout and fire immediately.
-	s := newSuspicion("me", 1, 100*time.Millisecond, 30*time.Second, f)
-	time.Sleep(200 * time.Millisecond)
-	s.Confirm("foo")
-
-	// Wait a little while since the function gets called in a goroutine.
-	select {
-	case <-ch:
-	case <-time.After(25 * time.Millisecond):
-		t.Fatalf("should have fired")
-	}
+		// A confirmation after the new timeout has already passed fires
+		// at once (from its own goroutine).
+		s := newSuspicion("me", 1, 100*time.Millisecond, 30*time.Second, f)
+		time.Sleep(200 * time.Millisecond)
+		s.Confirm("foo")
+		synctest.Wait()
+		select {
+		case d := <-ch:
+			if d != 200*time.Millisecond {
+				t.Fatalf("fired at %v, want 200ms (at the confirmation)", d)
+			}
+		default:
+			t.Fatal("should have fired")
+		}
+	})
 }
