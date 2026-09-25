@@ -1382,11 +1382,14 @@ func TestSendReliableRefusesOversizedMessages(t *testing.T) {
 // decompressed form is within maxDecompressedBytes must be accepted even
 // when its compressed form is larger than that.
 func TestReadStreamAcceptsIncompressibleCompressedState(t *testing.T) {
+	if raceDetector {
+		t.Skip("single-goroutine size check; ~33 MB of input costs 16 s under the race detector")
+	}
 	m := GetMemberlist(t, func(c *Config) { c.Transport = (&MockNetwork{}).NewTransport("node") })
 	t.Cleanup(func() { _ = m.Shutdown() })
 
 	// A large cluster: 20,000 nodes with 512 bytes of random meta and a
-	// full 20 MiB of random user state — about 31 MB decompressed.
+	// full 20 MiB of random user state — about 32.7 MB decompressed.
 	r := rand.New(rand.NewPCG(1, 2))
 	random := func(n int) []byte {
 		b := make([]byte, n)
@@ -1419,8 +1422,10 @@ func TestReadStreamAcceptsIncompressibleCompressedState(t *testing.T) {
 }
 
 // TestReadStreamOversizedDeclaredFields covers issue #21: a stream whose
-// compressed buffer or node field declares a huge length, but carries few
-// bytes, is refused without allocating the declared size.
+// compressed buffer or node field declares a large length — within the
+// field limits, so only allocation that grows with the bytes received can
+// save memory — but carries 1 KiB is refused without allocating the
+// declared size.
 func TestReadStreamOversizedDeclaredFields(t *testing.T) {
 	m := GetMemberlist(t, func(c *Config) { c.Transport = (&MockNetwork{}).NewTransport("node") })
 	t.Cleanup(func() { _ = m.Shutdown() })
@@ -1429,14 +1434,22 @@ func TestReadStreamOversizedDeclaredFields(t *testing.T) {
 		return binary.BigEndian.AppendUint32(append(b, 0xdb), n)
 	}
 	compressedBuf := []byte{byte(compressMsg), 0x82, 0xa4, 'A', 'l', 'g', 'o', 0x00, 0xa3, 'B', 'u', 'f'}
-	compressedBuf = append(str32(compressedBuf, 0xffff_fff0), make([]byte, 1024)...)
+	compressedBuf = append(str32(compressedBuf, 60<<20), make([]byte, 1024)...)
 
 	nodeMeta := pushPullHeader{Nodes: 1}.AppendMsgpack([]byte{byte(pushPullMsg)})
 	nodeMeta = append(nodeMeta, 0x82, 0xa4, 'N', 'a', 'm', 'e', 0xa1, 'p', 0xa4, 'M', 'e', 't', 'a')
-	nodeMeta = append(str32(nodeMeta, 0xffff_fff0), make([]byte, 1024)...)
+	nodeMeta = append(str32(nodeMeta, 1<<20), make([]byte, 1024)...)
 
-	for name, stream := range map[string][]byte{"compress.Buf": compressedBuf, "pushNodeState.Meta": nodeMeta} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream []byte
+		budget uint64 // well below the declared length
+	}{
+		{"compress.Buf", compressedBuf, 4 << 20},
+		{"pushNodeState.Meta", nodeMeta, 512 << 10},
+	} {
+		stream := tc.stream
+		t.Run(tc.name, func(t *testing.T) {
 			var readErr error
 			alloc := allocatedBytes(func() {
 				msgType, dec, err := m.readStream(streamFrom(t, stream), "")
@@ -1449,7 +1462,32 @@ func TestReadStreamOversizedDeclaredFields(t *testing.T) {
 				}
 			})
 			isErr(t, readErr)
-			lessOrEqual(t, alloc, uint64(4<<20), "allocation for a %d-byte stream", len(stream))
+			lessOrEqual(t, alloc, tc.budget, "allocation for a %d-byte stream", len(stream))
 		})
 	}
+}
+
+// TestEncryptedStreamSenderLimit: receivers refuse encrypted stream
+// messages whose ciphertext exceeds maxPushStateBytes, so senders must fail
+// with ErrMessageTooLarge rather than send something that is dropped.
+func TestEncryptedStreamSenderLimit(t *testing.T) {
+	n := &MockNetwork{}
+	key := []byte("0123456789abcdef")
+	m1 := GetMemberlist(t, func(c *Config) {
+		c.Transport = n.NewTransport("node1")
+		c.SecretKey = key
+		c.EnableCompression = false
+	})
+	t.Cleanup(func() { _ = m1.Shutdown() })
+	m2 := GetMemberlist(t, func(c *Config) {
+		c.Transport = n.NewTransport("node2")
+		c.SecretKey = key
+	})
+	t.Cleanup(func() { _ = m2.Shutdown() })
+
+	// A 20 MiB user message passes the plaintext limit, but its ciphertext
+	// (plus the stream header) is above what receivers accept.
+	to := &Node{Name: "node2", Addr: net.ParseIP("127.0.0.2"), Port: 1}
+	errIs(t, m1.SendReliable(to, make([]byte, maxUserMsgBytes)), ErrMessageTooLarge)
+	noErr(t, m1.SendReliable(to, make([]byte, maxUserMsgBytes-1024)), "a message within the encrypted limit")
 }

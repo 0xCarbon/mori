@@ -830,6 +830,11 @@ func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel
 
 	// Check if encryption is enabled
 	if m.config.EncryptionEnabled() && m.config.GossipVerifyOutgoing {
+		// Receivers refuse encrypted stream messages above
+		// maxPushStateBytes; fail here with a clear error instead.
+		if n := encryptedLength(m.encryptionVersion(), len(sendBuf)); n > maxPushStateBytes {
+			return fmt.Errorf("%w: encrypted stream message of %d bytes > %d", ErrMessageTooLarge, n, maxPushStateBytes)
+		}
 		crypt, err := m.encryptLocalState(sendBuf, streamLabel)
 		if err != nil {
 			m.logger.Error("failed to encrypt local state", "error", err)
@@ -1067,9 +1072,12 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 	}
 	msgType := messageType(b)
 	var dec *msgpack.Decoder
-	if msgType == compressMsg {
+	switch msgType {
+	case compressMsg:
 		dec = msgpack.NewStreamDecoder(bufConn)
-	} else {
+	case encryptMsg:
+		// Decoded from the decrypted slice below.
+	default:
 		dec = msgpack.NewStreamDecoder(&limitedSource{r: bufConn, n: maxStreamMessageBytes - 1})
 	}
 

@@ -11,4 +11,4 @@
 
 - [ ] `make ci` passes (and `make oracle` for changes to `internal/wire` or `internal/msgpack`).
 - [ ] Behavior changes have tests, docs and a CHANGELOG entry under `Unreleased`.
-- [ ] If an AI tool helped, I have read and followed the [AI usage guide](../CONTRIBUTING.md#ai-usage).
+- [ ] If an AI tool helped, I have read and followed the [AI usage guide](https://github.com/0xCarbon/mori/blob/main/CONTRIBUTING.md#ai-usage).

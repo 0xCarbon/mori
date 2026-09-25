@@ -10,11 +10,17 @@
 ### Fixed
 
 * A compressed stream message is read against the largest valid compressed
-  form of a `maxDecompressedBytes` message (LZW can expand incompressible
-  input up to 1.5x), not the 40 MiB plaintext cap. Senders compress stream
-  messages whether or not that shrinks them, so v0.8.0 refused legitimate
-  push/pull states between about 29 and 40 MiB with incompressible
-  content. Plaintext stream messages keep the 40 MiB cap.
+  form of a `maxDecompressedBytes` message (LZW expands incompressible
+  input by about 1.37x, 1.41x at worst in practice, 1.5x in theory), not
+  the 40 MiB plaintext cap. Senders compress stream messages whether or not
+  that shrinks them, so v0.8.0 refused legitimate unencrypted push/pull
+  states from about 28 to 40 MiB with incompressible content. Plaintext
+  stream messages keep the 40 MiB cap. Encrypted stream messages remain
+  limited to 20 MiB of ciphertext, as upstream.
+* Senders now refuse, with `ErrMessageTooLarge`, an encrypted stream message
+  (push/pull state or `SendReliable`) whose ciphertext exceeds the 20 MiB
+  receivers accept; before, the receiver dropped it with an error only it
+  logged.
 
 ### Security
 

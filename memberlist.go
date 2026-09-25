@@ -51,8 +51,10 @@ var (
 	// node map, e.g. because the instance never went alive.
 	ErrNoLocalNode = errors.New("memberlist: local node not found in node map")
 
-	// ErrMessageTooLarge is returned by SendReliable for a message larger
-	// than receivers accept on a stream (20 MiB).
+	// ErrMessageTooLarge is returned when a stream message is larger than
+	// receivers accept: a SendReliable message above 20 MiB, or, with
+	// encryption, any stream message whose ciphertext would exceed 20 MiB
+	// (for example a large push/pull state).
 	ErrMessageTooLarge = errors.New("memberlist: message exceeds the stream user message limit")
 
 	// ErrLeft is returned by UpdateNode/UpdateNodeContext after the node
@@ -959,8 +961,8 @@ func (m *Memberlist) SendBestEffort(to *Node, msg []byte) error {
 // SendReliable uses the reliable stream-oriented interface of the transport to
 // target a user message at the given node (this does not use the gossip
 // mechanism). A nil error means the message was written to the stream.
-// Messages above 20 MiB, which receivers refuse, fail with
-// ErrMessageTooLarge.
+// Messages receivers would refuse — above 20 MiB, or, with encryption,
+// whose ciphertext would exceed 20 MiB — fail with ErrMessageTooLarge.
 func (m *Memberlist) SendReliable(to *Node, msg []byte) error {
 	return m.sendUserMsg(to.FullAddress(), msg)
 }
