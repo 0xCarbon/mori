@@ -12,8 +12,8 @@
 * A compressed stream message is read against the largest valid compressed
   form of a `maxDecompressedBytes` message (LZW expands incompressible
   input by about 1.37x, 1.41x at worst in practice, 1.5x in theory), not
-  the 40 MiB plaintext cap. Senders compress stream messages whether or not
-  that shrinks them, so v0.8.0 refused legitimate unencrypted push/pull
+  the 40 MiB plaintext cap. Upstream memberlist and Mori v0.8.0 senders
+  compress stream messages whether or not that shrinks them, so v0.8.0 refused legitimate unencrypted push/pull
   states from about 28 to 40 MiB with incompressible content. Plaintext
   stream messages keep the 40 MiB cap. Encrypted stream messages remain
   limited to 20 MiB of ciphertext, as upstream.
@@ -25,7 +25,13 @@
 * Senders now refuse, with `ErrMessageTooLarge`, an encrypted stream message
   (push/pull state or `SendReliable`) whose ciphertext exceeds the 20 MiB
   receivers accept; before, the receiver dropped it with an error only it
-  logged.
+  logged. A push/pull state with user state above 20 MiB or a plaintext
+  message above 40 MiB also fails with `ErrMessageTooLarge` (before: an
+  unwrapped error, or no error for the user state). A responder whose
+  state is too large now answers the initiator with that error instead of
+  closing the stream, so `Join` reports the cause rather than `EOF`.
+  `ErrMessageTooLarge`'s text is now "memberlist: stream message exceeds
+  the size receivers accept".
 
 ### Security
 

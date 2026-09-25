@@ -1378,8 +1378,9 @@ func TestSendReliableRefusesOversizedMessages(t *testing.T) {
 	isErr(t, err, "an undeliverable stream user message was reported as sent")
 }
 
-// TestReadStreamAcceptsIncompressibleCompressedState: senders compress
-// stream messages whether or not that shrinks them, and LZW expands
+// TestReadStreamAcceptsIncompressibleCompressedState: upstream memberlist
+// and Mori v0.8.0 senders compress stream messages whether or not that
+// shrinks them, and LZW expands
 // incompressible data (about 1.37x, at most 1.5x). A push/pull whose
 // decompressed form is within maxDecompressedBytes must be accepted even
 // when its compressed form is larger than that.
@@ -1603,5 +1604,90 @@ func TestStreamCompressionOnlyWhenSmaller(t *testing.T) {
 			equal(t, tc.want, messageType(sent[0]))
 			lessOrEqual(t, len(sent), len(msg), "sent size")
 		})
+	}
+}
+
+// TestSendLocalStateTooLarge: a push/pull state receivers would refuse
+// (user state above maxPushStateBytes, or a plaintext message above
+// maxStreamMessageBytes) fails with ErrMessageTooLarge before any write.
+func TestSendLocalStateTooLarge(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		nodes int
+		state int
+	}{
+		{"user state", 0, maxPushStateBytes + 1},
+		{"plaintext message", 24, maxPushStateBytes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &MockDelegate{state: make([]byte, tc.state)}
+			m := GetMemberlist(t, func(c *Config) {
+				c.Transport = (&MockNetwork{}).NewTransport("node")
+				c.EnableCompression = false
+				c.Delegate = d
+			})
+			t.Cleanup(func() { _ = m.Shutdown() })
+			vsn := []uint8{ProtocolVersionMin, ProtocolVersionMax, ProtocolVersionMax, 0, 0, 0}
+			for i := range tc.nodes {
+				m.aliveNode(&alive{Node: fmt.Sprintf("n%02d", i), Addr: []byte{10, 0, 0, byte(i + 1)}, Port: 7946, Meta: make([]byte, 900<<10), Incarnation: 1, Vsn: vsn}, false)
+			}
+			w := &countingConn{}
+			errIs(t, m.sendLocalState(w, false, ""), ErrMessageTooLarge)
+			equal(t, 0, w.n, "bytes written")
+		})
+	}
+}
+
+// countingConn is a net.Conn that counts and discards writes.
+type countingConn struct {
+	net.Conn
+	n int
+}
+
+func (c *countingConn) Write(b []byte) (int, error) { c.n += len(b); return len(b), nil }
+
+func (c *countingConn) SetDeadline(time.Time) error { return nil }
+
+func (c *countingConn) RemoteAddr() net.Addr { return &net.TCPAddr{} }
+
+// TestPushPullOversizeRemoteStateReportsCause: when the responder's state
+// is too large to send, the initiator gets the cause as a remote error
+// instead of a bare EOF.
+func TestPushPullOversizeRemoteStateReportsCause(t *testing.T) {
+	n := &MockNetwork{}
+	key := []byte("0123456789abcdef")
+	m1 := GetMemberlist(t, func(c *Config) {
+		c.Transport = n.NewTransport("node1")
+		c.SecretKey = key
+	})
+	t.Cleanup(func() { _ = m1.Shutdown() })
+	m2 := GetMemberlist(t, func(c *Config) {
+		c.Transport = n.NewTransport("node2")
+		c.SecretKey = key
+		c.EnableCompression = false
+		// Within the user state limit, but its ciphertext is not.
+		c.Delegate = &MockDelegate{state: make([]byte, maxPushStateBytes)}
+	})
+	t.Cleanup(func() { _ = m2.Shutdown() })
+
+	_, _, err := m1.sendAndReceiveState(Address{Addr: "127.0.0.2:1", Name: "node2"}, false)
+	if err == nil || !strings.Contains(err.Error(), "remote error") || !strings.Contains(err.Error(), ErrMessageTooLarge.Error()) {
+		t.Fatalf("push/pull error %v, want a remote error carrying %q", err, ErrMessageTooLarge)
+	}
+}
+
+// TestCompressedStreamBudgetCoversLZWWorstCase pins
+// maxCompressedStreamBytes to the largest compressed/lzw output of a
+// maxDecompressedBytes payload: at most one 12-bit code per input byte,
+// one clear code per 3,839 codes (4096 - 257 literal+control codes before
+// the table fills), the end code, and the compress.Buf framing (type byte,
+// map with Algo and Buf entries, 5-byte raw header).
+func TestCompressedStreamBudgetCoversLZWWorstCase(t *testing.T) {
+	const n = maxDecompressedBytes
+	codes := n + n/3839 + 2 // data, clear codes, end code
+	lzw := (codes*12 + 7) / 8
+	framing := len(compress{Algo: uint8(lzwAlgo), Buf: make([]byte, 1<<17)}.AppendMsgpack([]byte{byte(compressMsg)})) - 1<<17
+	if need := framing + lzw; maxCompressedStreamBytes < need {
+		t.Fatalf("maxCompressedStreamBytes = %d, want >= %d (LZW worst case of %d bytes)", maxCompressedStreamBytes, need, n)
 	}
 }

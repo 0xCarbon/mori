@@ -107,8 +107,9 @@ const (
 	maxStreamMessageBytes = maxDecompressedBytes
 
 	// maxCompressedStreamBytes bounds a compressed stream message as read
-	// from the connection. Senders compress stream messages whether or not
-	// that shrinks them, and LZW expands incompressible input: each code is
+	// from the connection. Upstream memberlist and Mori v0.8.0 senders
+	// compress stream messages whether or not that shrinks them, and LZW
+	// expands incompressible input: each code is
 	// at most 12 bits and covers at least one byte (1.5x), plus a clear code
 	// per 3,839 codes and the end code. A message within
 	// maxDecompressedBytes must fit.
@@ -245,6 +246,14 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 
 		if err := m.sendLocalState(conn, join, streamLabel); err != nil {
 			m.logger.Error("failed to push local state", "error", err, connAttr(conn))
+			// Nothing was written; tell the initiator why instead of
+			// leaving it a bare EOF.
+			if errors.Is(err, ErrMessageTooLarge) {
+				out := encode(errMsg, errResp{Error: err.Error()})
+				if err := m.rawSendMsgStream(conn, out, streamLabel); err != nil {
+					m.logger.Error("failed to send error", "error", err, connAttr(conn))
+				}
+			}
 			return
 		}
 
@@ -980,10 +989,14 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 	out = append(out, userData...)
 
 	m.metrics.gauge(keySizeLocal, float32(len(out)))
-	// Peers refuse plaintext stream messages above maxStreamMessageBytes;
-	// report the cause here instead of an opaque failure there.
+	// Peers refuse user state above maxPushStateBytes and plaintext stream
+	// messages above maxStreamMessageBytes; report the cause here instead
+	// of an opaque failure there.
+	if len(userData) > maxPushStateBytes {
+		return fmt.Errorf("%w: local user state of %d bytes > %d", ErrMessageTooLarge, len(userData), maxPushStateBytes)
+	}
 	if len(out) > maxStreamMessageBytes {
-		return fmt.Errorf("local push/pull state is %d bytes, above the %d-byte stream limit", len(out), maxStreamMessageBytes)
+		return fmt.Errorf("%w: local push/pull state of %d bytes > %d", ErrMessageTooLarge, len(out), maxStreamMessageBytes)
 	}
 	return m.rawSendMsgStream(conn, out, streamLabel)
 }

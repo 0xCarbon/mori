@@ -52,9 +52,9 @@ var (
 	ErrNoLocalNode = errors.New("memberlist: local node not found in node map")
 
 	// ErrMessageTooLarge is returned when a stream message is larger than
-	// receivers accept: a SendReliable message above 20 MiB, or, with
-	// encryption, any stream message whose ciphertext would exceed 20 MiB
-	// (for example a large push/pull state).
+	// receivers accept: a SendReliable message or push/pull user state
+	// above 20 MiB, a push/pull state above 40 MiB, or, with encryption,
+	// any stream message whose ciphertext would exceed 20 MiB.
 	ErrMessageTooLarge = errors.New("memberlist: stream message exceeds the size receivers accept")
 
 	// ErrLeft is returned by UpdateNode/UpdateNodeContext after the node

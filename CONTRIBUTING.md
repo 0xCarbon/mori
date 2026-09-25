@@ -38,10 +38,10 @@ Do not open public issues for vulnerabilities. Follow
   tests, godoc comments and README/SECURITY as needed, plus a CHANGELOG
   entry under `Unreleased` (mark breaking changes **BREAKING**).
 - **`make ci` passes.** It runs formatting, `go fix -diff`, vet,
-  golangci-lint, cross builds, the dependency audit, the tests on amd64 and
-  386, the race detector and a benchmark smoke. For changes to
-  `internal/wire` or `internal/msgpack`, also run `make oracle` yourself
-  (the go-msgpack differential; `make ci` does not run it).
+  golangci-lint, cross builds, the dependency audit, `go mod tidy -diff`,
+  the tests on amd64 and 386, the race detector and a benchmark smoke. For
+  changes to `internal/wire` or `internal/msgpack`, also run `make oracle`
+  yourself (the go-msgpack differential; `make ci` does not run it).
 - **Evidence goes in the pull request, not the tree.** Benchmark
   comparisons (interleaved runs compared with `go run ./tools/benchcmp`),
   fuzz runs and other receipts belong in the description; raw outputs,
