@@ -390,8 +390,7 @@ func (m *Memberlist) probeNode(node *nodeState) {
 		s := suspect{Incarnation: node.Incarnation, Node: node.Name, From: m.config.Name}
 		msgs := [][]byte{encode(pingMsg, ping), encode(suspectMsg, s)}
 
-		compound := makeCompoundMessage(msgs)
-		if err := m.rawSendMsgPacket(node.FullAddress(), &node.Node, compound.Bytes()); err != nil {
+		if err := m.rawSendMsgPacket(node.FullAddress(), &node.Node, makeCompoundMessage(msgs)); err != nil {
 			m.logger.Error("failed to send UDP compound ping and suspect message", "node", node.Name, "addr", addr, "error", err)
 			if failedRemote(err) {
 				goto HANDLE_REMOTE_FAILURE
@@ -653,7 +652,7 @@ func (m *Memberlist) gossip() {
 			// Otherwise create and send one or more compound messages
 			compounds := makeCompoundMessages(msgs)
 			for _, compound := range compounds {
-				if err := m.rawSendMsgPacket(node.FullAddress(), &node, compound.Bytes()); err != nil {
+				if err := m.rawSendMsgPacket(node.FullAddress(), &node, compound); err != nil {
 					m.logger.Error("failed to send gossip", "node", node.Name, "addr", addr, "error", err)
 				}
 			}

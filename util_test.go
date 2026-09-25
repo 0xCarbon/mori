@@ -4,8 +4,11 @@
 package mori
 
 import (
+	"bytes"
 	"fmt"
+	"math/rand/v2"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -329,7 +332,7 @@ func TestMakeCompoundMessage(t *testing.T) {
 	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
 
-	if compound.Len() != 3*len(buf)+3*compoundOverhead+compoundHeaderOverhead {
+	if len(compound) != 3*len(buf)+3*compoundOverhead+compoundHeaderOverhead {
 		t.Fatalf("bad len")
 	}
 }
@@ -341,7 +344,7 @@ func TestDecodeCompoundMessage(t *testing.T) {
 	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
 
-	trunc, parts, err := decodeCompoundMessage(compound.Bytes()[1:])
+	trunc, parts, err := decodeCompoundMessage(compound[1:])
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
@@ -372,7 +375,7 @@ func TestDecodeCompoundMessage_Trunc(t *testing.T) {
 	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
 
-	trunc, parts, err := decodeCompoundMessage(compound.Bytes()[1:38])
+	trunc, parts, err := decodeCompoundMessage(compound[1:38])
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
@@ -439,4 +442,64 @@ func TestDecompressBufferLimit(t *testing.T) {
 	if _, err := decompressPayload(bomb[1:]); err == nil {
 		t.Fatal("packet payload above maxPacketDecompressedBytes was accepted")
 	}
+}
+
+// TestMaxIncompressiblePacket: no message of at most maxIncompressiblePacket
+// bytes compresses to fewer bytes, so skipping compression for them cannot
+// change what is sent. The most compressible inputs (short periods) are
+// checked, and a 25-byte run of zeros does compress, so the bound is not
+// vacuous.
+func TestMaxIncompressiblePacket(t *testing.T) {
+	r := rand.New(rand.NewPCG(3, 4))
+	for n := 1; n <= maxIncompressiblePacket; n++ {
+		inputs := [][]byte{}
+		for period := 1; period <= 4; period++ {
+			in := make([]byte, n)
+			for i := range in {
+				in[i] = byte(i % period)
+			}
+			inputs = append(inputs, in)
+		}
+		for range 64 {
+			in := make([]byte, n)
+			for i := range in {
+				in[i] = byte(r.IntN(3))
+			}
+			inputs = append(inputs, in)
+		}
+		for _, in := range inputs {
+			out, err := compressPayload(in)
+			noErr(t, err)
+			if len(out) < len(in) {
+				t.Fatalf("%d-byte input %x compressed to %d bytes", n, in, len(out))
+			}
+		}
+	}
+	out, err := compressPayload(make([]byte, 25))
+	noErr(t, err)
+	less(t, len(out), 25, "a 25-byte zero run must compress")
+}
+
+// TestCompressionConcurrent exercises the pooled LZW coders from many
+// goroutines (run under -race in make ci).
+func TestCompressionConcurrent(t *testing.T) {
+	var wg sync.WaitGroup
+	for g := range 16 {
+		wg.Go(func() {
+			for i := range 200 {
+				in := bytes.Repeat([]byte{byte(g), byte(i)}, 100+i)
+				out, err := compressPayload(in)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				got, err := decompressPayload(out[1:])
+				if err != nil || !bytes.Equal(got, in) {
+					t.Errorf("round trip %d/%d: %v", g, i, err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
 }

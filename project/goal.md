@@ -58,7 +58,7 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
 | W4 | Telemetry: `Config.Metrics` sink replaces go-metrics; `log/slog` replaces `log` | done |
 | W5 | Wire codec: `internal/msgpack` + `internal/wire`, golden vectors, differential evidence; drop go-msgpack | done |
 | W6 | Tests: testify/goleak -> std; synctest for timer-driven tests; flake removal | done |
-| W7 | Performance: UDP receive buffer reuse, encode/decode allocations, benchmarks + evidence | pending |
+| W7 | Performance: UDP receive buffer reuse, encode/decode allocations, benchmarks + evidence | done |
 | W8 | Fuzz targets, SECURITY.md threat model, README/CHANGELOG v0.8.0, independent review | pending |
 
 ## Decisions
@@ -130,6 +130,14 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
   5.2 s, race 51 s -> 10.4 s; -count=5 and race -count=3 clean. Mutation
   check: 1 ms timeout shift and missing awareness scaling both caught
   (evidence/w6-tests).
+
+- 2026-09-25 W7: benchmarks/ (public API) + portable internal benchmarks;
+  interleaved A/B harness (evidence/w7-perf/run.sh). Phase A (refactor):
+  alive -83.5%, merge -75.6%, queue -42..57%. Phase B: LZW pooling and
+  provable tiny-packet skip (ping -94%, 78 KB -> 416 B), cached AES-GCM
+  (encrypted ping -57%), UDP buffer reuse (-37..40%, -98% bytes), treap
+  seek (queue@10k -37%, 54 -> 7 allocs). Untouched paths ~. bench-smoke
+  gate added to make ci.
 
 ## Findings to fix (discovered during the waves)
 

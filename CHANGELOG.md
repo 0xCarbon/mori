@@ -2,6 +2,16 @@
 
 ### Improvements
 
+* Performance, compared with the code before this release (two interleaved
+  A/B phases, chained where both apply; go1.27.1; details and raw data in
+  `project/evidence/w7-perf`): handling an alive message −84%
+  time and 50 → 10 allocations; merging a 1,000-node push/pull state −76%;
+  handling a ping −96% overall (LZW coders are pooled and packets of at
+  most 22 bytes, which LZW provably cannot shrink, skip compression);
+  encrypted gossip reuses per-key AES-GCM ciphers (encrypted ping −57%);
+  the UDP listener reuses one receive buffer instead of allocating 64 KiB
+  per datagram (−37% time, −98% bytes per packet); the broadcast queue at
+  10,000 nodes −64% time and 123 → 7 allocations.
 * Mori owns its wire codec (`internal/msgpack`, `internal/wire`) instead of
   `github.com/hashicorp/go-msgpack/v2`. The encoding is byte-for-byte what
   go-msgpack's default handle produces, proven by a differential oracle

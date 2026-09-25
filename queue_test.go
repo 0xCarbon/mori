@@ -112,6 +112,22 @@ func TestTreapMatchesSortedOracle(t *testing.T) {
 		if !slices.Equal(got, oracle[i:]) {
 			t.Fatalf("step %d: ascendFrom(%+v) differs from the oracle", step, k)
 		}
+		var ceil *limitedBroadcast
+		if i < len(oracle) {
+			ceil = oracle[i]
+		}
+		if got := treapCeil(root, k); got != ceil {
+			t.Fatalf("step %d: treapCeil(%+v) = %+v, want %+v", step, k, got, ceil)
+		}
+		for j, x := range oracle {
+			var next *limitedBroadcast
+			if j+1 < len(oracle) {
+				next = oracle[j+1]
+			}
+			if got := treapNext(root, x); got != next {
+				t.Fatalf("step %d: treapNext(%+v) = %+v, want %+v", step, x, got, next)
+			}
+		}
 	}
 }
 

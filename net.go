@@ -309,7 +309,7 @@ func (m *Memberlist) ingestPacket(buf []byte, from net.Addr, timestamp time.Time
 	if m.config.EncryptionEnabled() {
 		// Decrypt the payload
 		authData := []byte(packetLabel)
-		plain, err := decryptPayload(m.config.Keyring.GetKeys(), buf, authData)
+		plain, err := openPayload(m.config.Keyring.getAEADs(), buf, authData)
 		if err != nil {
 			if !m.config.GossipVerifyIncoming {
 				// Treat the message as plaintext
@@ -741,11 +741,8 @@ func (m *Memberlist) sendMsg(a Address, msg []byte) error {
 	msgs = append(msgs, msg)
 	msgs = append(msgs, extra...)
 
-	// Create a compound message
-	compound := makeCompoundMessage(msgs)
-
-	// Send the message
-	return m.rawSendMsgPacket(a, nil, compound.Bytes())
+	// Create and send a compound message
+	return m.rawSendMsgPacket(a, nil, makeCompoundMessage(msgs))
 }
 
 // rawSendMsgPacket is used to send message via packet to another host without
@@ -755,8 +752,8 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 		return errNodeNamesAreRequired
 	}
 
-	// Check if we have compression enabled
-	if m.config.EnableCompression {
+	// Check if we have compression enabled (and the message could shrink)
+	if m.config.EnableCompression && len(msg) > maxIncompressiblePacket {
 		buf, err := compressPayload(msg)
 		if err != nil {
 			m.logger.Warn("failed to compress payload", "error", err)
@@ -795,17 +792,12 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 	// Check if we have encryption enabled
 	if m.config.EncryptionEnabled() && m.config.GossipVerifyOutgoing {
 		// Encrypt the payload
-		var (
-			primaryKey  = m.config.Keyring.GetPrimaryKey()
-			packetLabel = []byte(m.config.Label)
-			buf         bytes.Buffer
-		)
-		err := encryptPayload(m.encryptionVersion(), primaryKey, msg, packetLabel, &buf)
+		sealed, err := sealPayload(m.encryptionVersion(), m.config.Keyring.primaryAEAD(), msg, []byte(m.config.Label), nil)
 		if err != nil {
 			m.logger.Error("encryption of message failed", "error", err)
 			return err
 		}
-		msg = buf.Bytes()
+		msg = sealed
 	}
 
 	m.metrics.counter(keyUDPSent, float32(len(msg)))
@@ -972,31 +964,22 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 
 // encryptLocalState is used to help encrypt local state before sending
 func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) ([]byte, error) {
-	var buf bytes.Buffer
-
-	// Write the encryptMsg byte
-	buf.WriteByte(byte(encryptMsg))
-
-	// Write the size of the message
-	sizeBuf := make([]byte, 4)
 	encVsn := m.encryptionVersion()
 	encLen := encryptedLength(encVsn, len(sendBuf))
-	binary.BigEndian.PutUint32(sizeBuf, uint32(encLen))
-	buf.Write(sizeBuf)
+	out := make([]byte, 5, 5+encLen)
+
+	// The encryptMsg byte and the size of the message
+	out[0] = byte(encryptMsg)
+	binary.BigEndian.PutUint32(out[1:], uint32(encLen))
 
 	// Authenticated Data is:
 	//
 	//   [messageType; byte] [messageLength; uint32] [stream_label; optional]
 	//
-	dataBytes := appendBytes(buf.Bytes()[:5], []byte(streamLabel))
+	dataBytes := append(out[:5:5], streamLabel...)
 
-	// Write the encrypted cipher text to the buffer
-	key := m.config.Keyring.GetPrimaryKey()
-	err := encryptPayload(encVsn, key, sendBuf, dataBytes, &buf)
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	// Append the encrypted cipher text
+	return sealPayload(encVsn, m.config.Keyring.primaryAEAD(), sendBuf, dataBytes, out)
 }
 
 // decryptRemoteState is used to help decrypt the remote state
@@ -1040,8 +1023,7 @@ func (m *Memberlist) decryptRemoteState(bufConn io.Reader, streamLabel string) (
 	cipherBytes := cipherText.Bytes()[5:]
 
 	// Decrypt the payload
-	keys := m.config.Keyring.GetKeys()
-	return decryptPayload(keys, cipherBytes, dataBytes)
+	return openPayload(m.config.Keyring.getAEADs(), cipherBytes, dataBytes)
 }
 
 // readStream is used to read messages from a stream connection, decrypting and

@@ -1,0 +1,90 @@
+BenchmarkPortableHandleAlive-32            	    2000	       686.7 ns/op	     592 B/op	      10 allocs/op
+BenchmarkPortableHandlePing-32             	    2000	     15233 ns/op	   78489 B/op	      16 allocs/op
+BenchmarkPortableMergeRemoteState-32       	    2000	    468636 ns/op	  432005 B/op	    5000 allocs/op
+BenchmarkPortableIngestEncryptedPing-32    	    2000	      2680 ns/op	    3928 B/op	      21 allocs/op
+BenchmarkPacketIngestAlive-32      	   19932	     59804 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkBroadcastQueue/100-32     	  718803	      1981 ns/op	    1056 B/op	       7 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  169845	      6980 ns/op	    5452 B/op	      53 allocs/op
+BenchmarkNetTransportReceive/64-32 	   64110	     17898 ns/op	   3.58 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   56475	     18175 ns/op	  77.03 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkPortableHandleAlive-32            	    2000	      1178 ns/op	     592 B/op	      10 allocs/op
+BenchmarkPortableHandlePing-32             	    2000	     18511 ns/op	   78484 B/op	      16 allocs/op
+BenchmarkPortableMergeRemoteState-32       	    2000	    478178 ns/op	  432018 B/op	    5000 allocs/op
+BenchmarkPortableIngestEncryptedPing-32    	    2000	      2975 ns/op	    3928 B/op	      21 allocs/op
+BenchmarkPacketIngestAlive-32      	   20242	     59882 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkBroadcastQueue/100-32     	  683317	      1710 ns/op	    1055 B/op	       7 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  197961	      6178 ns/op	    5613 B/op	      55 allocs/op
+BenchmarkNetTransportReceive/64-32 	   69754	     16458 ns/op	   3.89 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   79304	     16293 ns/op	  85.93 MB/s	   65655 B/op	       4 allocs/op
+BenchmarkPortableHandleAlive-32            	    2000	       765.3 ns/op	     592 B/op	      10 allocs/op
+BenchmarkPortableHandlePing-32             	    2000	     17669 ns/op	   78486 B/op	      16 allocs/op
+BenchmarkPortableMergeRemoteState-32       	    2000	    671969 ns/op	  432024 B/op	    5000 allocs/op
+BenchmarkPortableIngestEncryptedPing-32    	    2000	      3229 ns/op	    3928 B/op	      21 allocs/op
+BenchmarkPacketIngestAlive-32      	   19716	     57821 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkBroadcastQueue/100-32     	  670884	      1645 ns/op	    1056 B/op	       7 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  197781	      6066 ns/op	    5626 B/op	      55 allocs/op
+BenchmarkNetTransportReceive/64-32 	   65126	     15738 ns/op	   4.07 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   78336	     15372 ns/op	  91.07 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkPortableHandleAlive-32            	    2000	       692.4 ns/op	     592 B/op	      10 allocs/op
+BenchmarkPortableHandlePing-32             	    2000	     14918 ns/op	   78489 B/op	      16 allocs/op
+BenchmarkPortableMergeRemoteState-32       	    2000	    466935 ns/op	  432002 B/op	    5000 allocs/op
+BenchmarkPortableIngestEncryptedPing-32    	    2000	      2832 ns/op	    3928 B/op	      21 allocs/op
+BenchmarkPacketIngestAlive-32      	   20643	     58531 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkBroadcastQueue/100-32     	  710386	      1534 ns/op	    1055 B/op	       7 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  220206	      5394 ns/op	    5316 B/op	      52 allocs/op
+BenchmarkNetTransportReceive/64-32 	   84964	     14450 ns/op	   4.43 MB/s	   65655 B/op	       4 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   82892	     14733 ns/op	  95.02 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkPortableHandleAlive-32            	    2000	       679.5 ns/op	     592 B/op	      10 allocs/op
+BenchmarkPortableHandlePing-32             	    2000	     14832 ns/op	   78487 B/op	      16 allocs/op
+BenchmarkPortableMergeRemoteState-32       	    2000	    456456 ns/op	  432002 B/op	    5000 allocs/op
+BenchmarkPortableIngestEncryptedPing-32    	    2000	      3666 ns/op	    3928 B/op	      21 allocs/op
+BenchmarkPacketIngestAlive-32      	   20029	     58978 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkBroadcastQueue/100-32     	  662346	      1654 ns/op	    1056 B/op	       8 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  183783	      5976 ns/op	    5684 B/op	      55 allocs/op
+BenchmarkNetTransportReceive/64-32 	   80670	     15304 ns/op	   4.18 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   76621	     16622 ns/op	  84.23 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkPortableHandleAlive-32            	    2000	       697.8 ns/op	     592 B/op	      10 allocs/op
+BenchmarkPortableHandlePing-32             	    2000	     13775 ns/op	   78486 B/op	      16 allocs/op
+BenchmarkPortableMergeRemoteState-32       	    2000	    455486 ns/op	  432000 B/op	    5000 allocs/op
+BenchmarkPortableIngestEncryptedPing-32    	    2000	      2762 ns/op	    3928 B/op	      21 allocs/op
+BenchmarkPacketIngestAlive-32      	   20191	     59091 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkBroadcastQueue/100-32     	  694428	      1445 ns/op	    1055 B/op	       7 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  221617	      5470 ns/op	    5569 B/op	      55 allocs/op
+BenchmarkNetTransportReceive/64-32 	   85752	     15070 ns/op	   4.25 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   71815	     15724 ns/op	  89.04 MB/s	   65653 B/op	       4 allocs/op
+BenchmarkPortableHandleAlive-32            	    2000	       699.0 ns/op	     592 B/op	      10 allocs/op
+BenchmarkPortableHandlePing-32             	    2000	     14118 ns/op	   78484 B/op	      16 allocs/op
+BenchmarkPortableMergeRemoteState-32       	    2000	    450661 ns/op	  432002 B/op	    5000 allocs/op
+BenchmarkPortableIngestEncryptedPing-32    	    2000	      3034 ns/op	    3928 B/op	      21 allocs/op
+BenchmarkPacketIngestAlive-32      	   20499	     57440 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkBroadcastQueue/100-32     	  759208	      1521 ns/op	    1055 B/op	       7 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  226657	      5531 ns/op	    5502 B/op	      54 allocs/op
+BenchmarkNetTransportReceive/64-32 	   83478	     14851 ns/op	   4.31 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   81156	     14609 ns/op	  95.83 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkPortableHandleAlive-32            	    2000	       664.2 ns/op	     592 B/op	      10 allocs/op
+BenchmarkPortableHandlePing-32             	    2000	     13343 ns/op	   78489 B/op	      16 allocs/op
+BenchmarkPortableMergeRemoteState-32       	    2000	    488714 ns/op	  432000 B/op	    5000 allocs/op
+BenchmarkPortableIngestEncryptedPing-32    	    2000	      2930 ns/op	    3928 B/op	      21 allocs/op
+BenchmarkPacketIngestAlive-32      	   17797	     59336 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkBroadcastQueue/100-32     	  717739	      1543 ns/op	    1056 B/op	       8 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  228307	      5501 ns/op	    5631 B/op	      54 allocs/op
+BenchmarkNetTransportReceive/64-32 	   68796	     16967 ns/op	   3.77 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   64064	     16827 ns/op	  83.20 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkPortableHandleAlive-32            	    2000	       678.6 ns/op	     592 B/op	      10 allocs/op
+BenchmarkPortableHandlePing-32             	    2000	     13362 ns/op	   78487 B/op	      16 allocs/op
+BenchmarkPortableMergeRemoteState-32       	    2000	    487805 ns/op	  432000 B/op	    5000 allocs/op
+BenchmarkPortableIngestEncryptedPing-32    	    2000	      2864 ns/op	    3928 B/op	      21 allocs/op
+BenchmarkPacketIngestAlive-32      	   20089	     59830 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkBroadcastQueue/100-32     	  751802	      1578 ns/op	    1055 B/op	       7 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  202490	      5686 ns/op	    5542 B/op	      55 allocs/op
+BenchmarkNetTransportReceive/64-32 	   83917	     14839 ns/op	   4.31 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   79971	     15371 ns/op	  91.08 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkPortableHandleAlive-32            	    2000	       678.1 ns/op	     592 B/op	      10 allocs/op
+BenchmarkPortableHandlePing-32             	    2000	     14097 ns/op	   78487 B/op	      16 allocs/op
+BenchmarkPortableMergeRemoteState-32       	    2000	    494723 ns/op	  432005 B/op	    5000 allocs/op
+BenchmarkPortableIngestEncryptedPing-32    	    2000	      3659 ns/op	    3928 B/op	      21 allocs/op
+BenchmarkPacketIngestAlive-32      	   20370	     63175 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkBroadcastQueue/100-32     	  634491	      1635 ns/op	    1056 B/op	       8 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  204951	      5344 ns/op	    5383 B/op	      53 allocs/op
+BenchmarkNetTransportReceive/64-32 	   83582	     14399 ns/op	   4.44 MB/s	   65654 B/op	       4 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   80973	     14803 ns/op	  94.57 MB/s	   65654 B/op	       4 allocs/op

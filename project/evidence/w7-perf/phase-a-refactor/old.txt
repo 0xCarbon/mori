@@ -1,0 +1,80 @@
+BenchmarkPortableHandleAlive-32         	    2000	      7636 ns/op	    3143 B/op	      50 allocs/op
+BenchmarkPortableHandlePing-32          	    2000	     65365 ns/op	   81743 B/op	      62 allocs/op
+BenchmarkPortableMergeRemoteState-32    	    2000	   3689785 ns/op	 1704085 B/op	   26000 allocs/op
+BenchmarkPacketIngestAlive-32      	   16592	     74314 ns/op	    3794 B/op	      61 allocs/op
+BenchmarkBroadcastQueue/100-32     	  249480	      5697 ns/op	    4814 B/op	     102 allocs/op
+BenchmarkBroadcastQueue/10000-32   	   92073	     12508 ns/op	    5786 B/op	     121 allocs/op
+BenchmarkNetTransportReceive/64-32 	   60399	     24278 ns/op	   2.64 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   39375	     31137 ns/op	  44.96 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkPortableHandleAlive-32         	    2000	      3993 ns/op	    3141 B/op	      50 allocs/op
+BenchmarkPortableHandlePing-32          	    2000	     20720 ns/op	   81731 B/op	      62 allocs/op
+BenchmarkPortableMergeRemoteState-32    	    2000	   2095363 ns/op	 1704059 B/op	   26000 allocs/op
+BenchmarkPacketIngestAlive-32      	   16569	     89934 ns/op	    3796 B/op	      61 allocs/op
+BenchmarkBroadcastQueue/100-32     	  273973	      3979 ns/op	    4814 B/op	     102 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  122743	     10931 ns/op	    5859 B/op	     123 allocs/op
+BenchmarkNetTransportReceive/64-32 	   64400	     18091 ns/op	   3.54 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   70003	     17615 ns/op	  79.48 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkPortableHandleAlive-32         	    2000	      4205 ns/op	    3141 B/op	      50 allocs/op
+BenchmarkPortableHandlePing-32          	    2000	     20876 ns/op	   81736 B/op	      62 allocs/op
+BenchmarkPortableMergeRemoteState-32    	    2000	   1913930 ns/op	 1704078 B/op	   26000 allocs/op
+BenchmarkPacketIngestAlive-32      	   17934	     65221 ns/op	    3795 B/op	      61 allocs/op
+BenchmarkBroadcastQueue/100-32     	  275914	      3782 ns/op	    4814 B/op	     102 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  132948	      9551 ns/op	    5876 B/op	     123 allocs/op
+BenchmarkNetTransportReceive/64-32 	   72000	     20431 ns/op	   3.13 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   62296	     19565 ns/op	  71.56 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkPortableHandleAlive-32         	    2000	      4021 ns/op	    3141 B/op	      50 allocs/op
+BenchmarkPortableHandlePing-32          	    2000	     21727 ns/op	   81726 B/op	      62 allocs/op
+BenchmarkPortableMergeRemoteState-32    	    2000	   1909868 ns/op	 1704055 B/op	   26000 allocs/op
+BenchmarkPacketIngestAlive-32      	   16879	     67171 ns/op	    3795 B/op	      61 allocs/op
+BenchmarkBroadcastQueue/100-32     	  309459	      3999 ns/op	    4814 B/op	     102 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  115846	     10240 ns/op	    5847 B/op	     123 allocs/op
+BenchmarkNetTransportReceive/64-32 	   65019	     18012 ns/op	   3.55 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   64674	     17713 ns/op	  79.04 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkPortableHandleAlive-32         	    2000	      4275 ns/op	    3141 B/op	      50 allocs/op
+BenchmarkPortableHandlePing-32          	    2000	     20685 ns/op	   81729 B/op	      62 allocs/op
+BenchmarkPortableMergeRemoteState-32    	    2000	   1853008 ns/op	 1704057 B/op	   26000 allocs/op
+BenchmarkPacketIngestAlive-32      	   17772	     67045 ns/op	    3795 B/op	      61 allocs/op
+BenchmarkBroadcastQueue/100-32     	  297729	      3837 ns/op	    4814 B/op	     102 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  137096	      9239 ns/op	    5882 B/op	     124 allocs/op
+BenchmarkNetTransportReceive/64-32 	   72387	     16419 ns/op	   3.90 MB/s	   65703 B/op	       5 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   75380	     17338 ns/op	  80.75 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkPortableHandleAlive-32         	    2000	      4228 ns/op	    3143 B/op	      50 allocs/op
+BenchmarkPortableHandlePing-32          	    2000	     20179 ns/op	   81727 B/op	      62 allocs/op
+BenchmarkPortableMergeRemoteState-32    	    2000	   1896445 ns/op	 1704055 B/op	   26000 allocs/op
+BenchmarkPacketIngestAlive-32      	   15517	     67506 ns/op	    3795 B/op	      61 allocs/op
+BenchmarkBroadcastQueue/100-32     	  282499	      5118 ns/op	    4814 B/op	     102 allocs/op
+BenchmarkBroadcastQueue/10000-32   	   99692	     14164 ns/op	    5809 B/op	     122 allocs/op
+BenchmarkNetTransportReceive/64-32 	   53928	     21237 ns/op	   3.01 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   60712	     18068 ns/op	  77.49 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkPortableHandleAlive-32         	    2000	      3962 ns/op	    3141 B/op	      50 allocs/op
+BenchmarkPortableHandlePing-32          	    2000	     19770 ns/op	   81738 B/op	      62 allocs/op
+BenchmarkPortableMergeRemoteState-32    	    2000	   1990458 ns/op	 1704062 B/op	   26000 allocs/op
+BenchmarkPacketIngestAlive-32      	   15404	     70564 ns/op	    3797 B/op	      61 allocs/op
+BenchmarkBroadcastQueue/100-32     	  268320	      4338 ns/op	    4814 B/op	     102 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  103844	     12014 ns/op	    5819 B/op	     122 allocs/op
+BenchmarkNetTransportReceive/64-32 	   66261	     20649 ns/op	   3.10 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   60097	     19003 ns/op	  73.67 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkPortableHandleAlive-32         	    2000	      3994 ns/op	    3142 B/op	      50 allocs/op
+BenchmarkPortableHandlePing-32          	    2000	     21324 ns/op	   81735 B/op	      62 allocs/op
+BenchmarkPortableMergeRemoteState-32    	    2000	   1971328 ns/op	 1704066 B/op	   26000 allocs/op
+BenchmarkPacketIngestAlive-32      	   17506	     68009 ns/op	    3795 B/op	      61 allocs/op
+BenchmarkBroadcastQueue/100-32     	  296305	      3978 ns/op	    4814 B/op	     102 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  125562	     10705 ns/op	    5864 B/op	     123 allocs/op
+BenchmarkNetTransportReceive/64-32 	   69744	     17679 ns/op	   3.62 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   67560	     18585 ns/op	  75.33 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkPortableHandleAlive-32         	    2000	      4230 ns/op	    3144 B/op	      50 allocs/op
+BenchmarkPortableHandlePing-32          	    2000	     20596 ns/op	   81736 B/op	      62 allocs/op
+BenchmarkPortableMergeRemoteState-32    	    2000	   1914350 ns/op	 1704076 B/op	   26000 allocs/op
+BenchmarkPacketIngestAlive-32      	   18180	     65906 ns/op	    3795 B/op	      61 allocs/op
+BenchmarkBroadcastQueue/100-32     	  316408	      4064 ns/op	    4814 B/op	     102 allocs/op
+BenchmarkBroadcastQueue/10000-32   	  122502	     10213 ns/op	    5859 B/op	     123 allocs/op
+BenchmarkNetTransportReceive/64-32 	   70786	     17522 ns/op	   3.65 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   72073	     21320 ns/op	  65.67 MB/s	   65702 B/op	       5 allocs/op
+BenchmarkPortableHandleAlive-32         	    2000	      5352 ns/op	    3143 B/op	      50 allocs/op
+BenchmarkPortableHandlePing-32          	    2000	     21823 ns/op	   81737 B/op	      62 allocs/op
+BenchmarkPortableMergeRemoteState-32    	    2000	   2292204 ns/op	 1704058 B/op	   26000 allocs/op
+BenchmarkPacketIngestAlive-32      	    9200	    153199 ns/op	    3802 B/op	      61 allocs/op
+BenchmarkBroadcastQueue/100-32     	  127246	      8136 ns/op	    4814 B/op	     102 allocs/op
+BenchmarkBroadcastQueue/10000-32   	   44528	     27672 ns/op	    5529 B/op	     115 allocs/op
+BenchmarkNetTransportReceive/64-32 	   48709	     40163 ns/op	   1.59 MB/s	   65701 B/op	       5 allocs/op
+BenchmarkNetTransportReceive/1400-32         	   54360	     21530 ns/op	  65.03 MB/s	   65702 B/op	       5 allocs/op

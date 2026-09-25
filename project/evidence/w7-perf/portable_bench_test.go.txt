@@ -1,0 +1,180 @@
+// Portable internal benchmarks for the W7 A/B comparison. run.sh copies
+// this file into each tree under comparison as package mori's
+// zz_portable_bench_test.go; it uses only identifiers present in both
+// (GetMemberlist, MockNetwork, handleAlive, handlePing, mergeRemoteState,
+// pushNodeState field names) and hand-encodes its messages, so neither
+// codec under comparison produces the input.
+
+package mori
+
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"net"
+	"testing"
+	"time"
+)
+
+func benchStr(b []byte, s string) []byte {
+	if len(s) < 32 {
+		b = append(b, 0xa0|byte(len(s)))
+	} else {
+		b = append(b, 0xda, byte(len(s)>>8), byte(len(s)))
+	}
+	return append(b, s...)
+}
+
+func benchUint(b []byte, v uint32) []byte {
+	switch {
+	case v < 128:
+		return append(b, byte(v))
+	case v < 256:
+		return append(b, 0xcc, byte(v))
+	case v < 65536:
+		return append(b, 0xcd, byte(v>>8), byte(v))
+	}
+	return binary.BigEndian.AppendUint32(append(b, 0xce), v)
+}
+
+// benchAlive encodes an alive message body (no type byte).
+func benchAlive(node string, addr net.IP, inc uint32, meta string) []byte {
+	b := []byte{0x86}
+	b = benchStr(b, "Addr")
+	b = benchStr(b, string(addr))
+	b = benchStr(b, "Incarnation")
+	b = benchUint(b, inc)
+	b = benchStr(b, "Meta")
+	b = benchStr(b, meta)
+	b = benchStr(b, "Node")
+	b = benchStr(b, node)
+	b = benchStr(b, "Port")
+	b = benchUint(b, 7946)
+	b = benchStr(b, "Vsn")
+	return benchStr(b, string([]byte{1, 5, 2, 0, 0, 0}))
+}
+
+// BenchmarkPortableHandleAlive: decode an alive message and apply it to a
+// known peer (new incarnation, changed meta), synchronously.
+func BenchmarkPortableHandleAlive(b *testing.B) {
+	m := GetMemberlist(b, func(c *Config) {
+		c.Transport = (&MockNetwork{}).NewTransport("local")
+	})
+	defer func() { _ = m.Shutdown() }()
+	from := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 7946}
+	peer := net.IPv4(10, 0, 0, 2).To4()
+	msgs := make([][]byte, b.N+1)
+	for i := range msgs {
+		msgs[i] = benchAlive("peer", peer, uint32(i+1), fmt.Sprint("role=api,zone=", i%2))
+	}
+	m.handleAlive(msgs[0], from)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 1; i <= b.N; i++ {
+		m.handleAlive(msgs[i], from)
+	}
+}
+
+// BenchmarkPortableHandlePing: decode a ping and encode and send the ack.
+func BenchmarkPortableHandlePing(b *testing.B) {
+	net1 := &MockNetwork{}
+	m := GetMemberlist(b, func(c *Config) {
+		c.Transport = net1.NewTransport("local")
+	})
+	defer func() { _ = m.Shutdown() }()
+	peer := net1.NewTransport("peer")
+	go func() {
+		for range peer.PacketCh() {
+		}
+	}()
+	msg := []byte{0x85}
+	msg = benchStr(msg, "Node")
+	msg = benchStr(msg, m.config.Name)
+	msg = benchStr(msg, "SeqNo")
+	msg = benchUint(msg, 7)
+	msg = benchStr(msg, "SourceAddr")
+	msg = benchStr(msg, string(net.IPv4(127, 0, 0, 2).To4()))
+	msg = benchStr(msg, "SourceNode")
+	msg = benchStr(msg, "peer")
+	msg = benchStr(msg, "SourcePort")
+	msg = benchUint(msg, 2)
+	from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 2}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		m.handlePing(msg, from)
+	}
+}
+
+// BenchmarkPortableMergeRemoteState: merge a 1000-node push/pull state in
+// which every node carries a new incarnation.
+func BenchmarkPortableMergeRemoteState(b *testing.B) {
+	m := GetMemberlist(b, func(c *Config) {
+		c.Transport = (&MockNetwork{}).NewTransport("local")
+	})
+	defer func() { _ = m.Shutdown() }()
+	const n = 1000
+	rounds := make([][]pushNodeState, b.N+1)
+	for r := range rounds {
+		rounds[r] = make([]pushNodeState, n)
+		for i := range rounds[r] {
+			rounds[r][i] = pushNodeState{
+				Name:        fmt.Sprint("node-", i),
+				Addr:        net.IPv4(10, 1, byte(i>>8), byte(i)).To4(),
+				Port:        7946,
+				Meta:        []byte("role=api"),
+				Incarnation: uint32(r + 1),
+				Vsn:         []uint8{1, 5, 2, 0, 0, 0},
+			}
+		}
+	}
+	if err := m.mergeRemoteState(false, rounds[0], nil); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for r := 1; r <= b.N; r++ {
+		if err := m.mergeRemoteState(false, rounds[r], nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkPortableIngestEncryptedPing: an AES-GCM encrypted ping through
+// ingestPacket: decrypt, decode, then encode, encrypt and send the ack.
+func BenchmarkPortableIngestEncryptedPing(b *testing.B) {
+	key := []byte("0123456789abcdef")
+	net1 := &MockNetwork{}
+	m := GetMemberlist(b, func(c *Config) {
+		c.Transport = net1.NewTransport("local")
+		c.SecretKey = key
+		c.EnableCompression = false
+	})
+	defer func() { _ = m.Shutdown() }()
+	peer := net1.NewTransport("peer")
+	go func() {
+		for range peer.PacketCh() {
+		}
+	}()
+	msg := []byte{0 /* pingMsg */, 0x85}
+	msg = benchStr(msg, "Node")
+	msg = benchStr(msg, m.config.Name)
+	msg = benchStr(msg, "SeqNo")
+	msg = benchUint(msg, 7)
+	msg = benchStr(msg, "SourceAddr")
+	msg = benchStr(msg, string(net.IPv4(127, 0, 0, 2).To4()))
+	msg = benchStr(msg, "SourceNode")
+	msg = benchStr(msg, "peer")
+	msg = benchStr(msg, "SourcePort")
+	msg = benchUint(msg, 2)
+	var sealed bytes.Buffer
+	if err := encryptPayload(1, key, msg, nil, &sealed); err != nil {
+		b.Fatal(err)
+	}
+	from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 2}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		m.ingestPacket(bytes.Clone(sealed.Bytes()), from, time.Now())
+	}
+}

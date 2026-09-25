@@ -5,6 +5,7 @@ package mori
 
 import (
 	"bytes"
+	"crypto/cipher"
 	"fmt"
 	"sync"
 )
@@ -15,6 +16,11 @@ type Keyring struct {
 	// which is used for encrypting messages, and is the first key tried during
 	// message decryption.
 	keys [][]byte
+
+	// aeads[i] is the AES-GCM instance for keys[i], built once when the
+	// keys are installed: creating the cipher per packet dominated the
+	// cost of encrypted gossip. AES-GCM is safe for concurrent use.
+	aeads []cipher.AEAD
 
 	// The keyring lock is used while performing IO operations on the keyring.
 	l sync.Mutex
@@ -144,7 +150,35 @@ func (k *Keyring) installKeysLocked(keys [][]byte, primaryKey []byte) {
 			newKeys = append(newKeys, key)
 		}
 	}
+	aeads := make([]cipher.AEAD, len(newKeys))
+	for i, key := range newKeys {
+		aead, err := newAEAD(key)
+		if err != nil {
+			// Unreachable: AddKey validates every key's length.
+			panic(fmt.Sprintf("memberlist: installing an invalid key: %v", err))
+		}
+		aeads[i] = aead
+	}
 	k.keys = newKeys
+	k.aeads = aeads
+}
+
+// getAEADs returns the ciphers for the installed keys, primary first. The
+// slice is replaced, never mutated, when keys change.
+func (k *Keyring) getAEADs() []cipher.AEAD {
+	k.l.Lock()
+	defer k.l.Unlock()
+	return k.aeads
+}
+
+// primaryAEAD returns the cipher for the primary key, or nil if none.
+func (k *Keyring) primaryAEAD() cipher.AEAD {
+	k.l.Lock()
+	defer k.l.Unlock()
+	if len(k.aeads) == 0 {
+		return nil
+	}
+	return k.aeads[0]
 }
 
 // GetKeys returns the current set of keys on the ring.

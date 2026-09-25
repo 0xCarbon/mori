@@ -57,7 +57,7 @@ func TestHandleCompoundPing(t *testing.T) {
 
 	// Send compound version
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err := udp.WriteTo(compound.Bytes(), addr)
+	_, err := udp.WriteTo(compound, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -1235,7 +1235,7 @@ func TestHandleCommandRejectsNestedEnvelopes(t *testing.T) {
 		}
 		return out
 	}
-	compound := func(b []byte) []byte { return makeCompoundMessage([][]byte{b}).Bytes() }
+	compound := func(b []byte) []byte { return makeCompoundMessage([][]byte{b}) }
 
 	cases := map[string][]byte{
 		"compress-in-compress": compress(compress(user)),

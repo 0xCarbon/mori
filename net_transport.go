@@ -336,10 +336,13 @@ func (t *NetTransport) tcpListen(tcpLn *net.TCPListener) {
 // hands them off to the packet channel.
 func (t *NetTransport) udpListen(udpLn *net.UDPConn) {
 	defer t.wg.Done()
+	// One receive buffer for the listener's lifetime: each packet is copied
+	// out at its real size. Allocating a 64 KiB buffer per datagram, as
+	// before, cost ~64 KiB of garbage per gossip packet.
+	buf := make([]byte, udpPacketBufSize)
 	for {
-		// Do a blocking read into a fresh buffer. Grab a time stamp as
-		// close as possible to the I/O.
-		buf := make([]byte, udpPacketBufSize)
+		// Do a blocking read. Grab a time stamp as close as possible to
+		// the I/O.
 		n, addr, err := udpLn.ReadFrom(buf)
 		ts := time.Now()
 		if err != nil {
@@ -361,7 +364,7 @@ func (t *NetTransport) udpListen(udpLn *net.UDPConn) {
 		// Ingest the packet.
 		t.metrics.counter(keyUDPReceived, float32(n))
 		t.packetCh <- &Packet{
-			Buf:       buf[:n],
+			Buf:       bytes.Clone(buf[:n]),
 			From:      addr,
 			Timestamp: ts,
 		}

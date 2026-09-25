@@ -168,6 +168,32 @@ func descend(t *limitedBroadcast, f func(*limitedBroadcast) bool) {
 	}
 }
 
+// treapCeil returns the first entry not ordering before k, or nil.
+func treapCeil(t, k *limitedBroadcast) *limitedBroadcast {
+	var best *limitedBroadcast
+	for t != nil {
+		if t.less(k) {
+			t = t.right
+		} else {
+			best, t = t, t.left
+		}
+	}
+	return best
+}
+
+// treapNext returns the entry right after x, or nil.
+func treapNext(t, x *limitedBroadcast) *limitedBroadcast {
+	var best *limitedBroadcast
+	for t != nil {
+		if x.less(t) {
+			best, t = t, t.left
+		} else {
+			t = t.right
+		}
+	}
+	return best
+}
+
 func treapMin(t *limitedBroadcast) *limitedBroadcast {
 	for t != nil && t.left != nil {
 		t = t.left
@@ -401,23 +427,14 @@ func (q *TransmitLimitedQueue) GetBroadcasts(overhead, limit int) [][]byte {
 			msgLen:    free,
 			id:        math.MaxInt64,
 		}
-		var keep *limitedBroadcast
-		ascendFrom(q.root, &greaterOrEqual, func(cur *limitedBroadcast) bool {
-			if cur.transmits != transmits {
-				return false // past this tier
-			}
-			// Check if this is within our limits
-			if int64(len(cur.b.Message())) > free {
-				// If this happens it's a bug in the datastructure or
-				// surrounding use doing something like having len(Message())
-				// change over time. There's enough going on here that it's
-				// probably sane to just skip it and move on for now.
-				return true
-			}
-			keep = cur
-			return false
-		})
-		if keep == nil {
+		keep := treapCeil(q.root, &greaterOrEqual)
+		// Check if this is within our limits. If not, it's a bug in the
+		// surrounding use, such as len(Message()) changing over time;
+		// skip such entries and move on.
+		for keep != nil && keep.transmits == transmits && int64(len(keep.b.Message())) > free {
+			keep = treapNext(q.root, keep)
+		}
+		if keep == nil || keep.transmits != transmits {
 			// No more items of an appropriate size in the tier.
 			transmits++
 			continue

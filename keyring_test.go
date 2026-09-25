@@ -183,3 +183,33 @@ func TestKeyring_AddConcurrentKeys(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestKeyringCachedCiphersFollowKeys: the cached AES-GCM ciphers always
+// match the installed keys, primary first, across every mutation.
+func TestKeyringCachedCiphersFollowKeys(t *testing.T) {
+	k1, k2, k3 := bytes.Repeat([]byte{1}, 16), bytes.Repeat([]byte{2}, 24), bytes.Repeat([]byte{3}, 32)
+	ring, err := NewKeyring([][]byte{k2}, k1)
+	noErr(t, err)
+	check := func(step string) {
+		t.Helper()
+		keys, aeads := ring.GetKeys(), ring.getAEADs()
+		equal(t, len(keys), len(aeads), step)
+		for i, key := range keys {
+			sealed, err := sealPayload(1, aeads[i], []byte("payload"), []byte("ad"), nil)
+			noErr(t, err, step)
+			plain, err := decryptPayload([][]byte{key}, sealed, []byte("ad"))
+			noErr(t, err, "%s: cipher %d does not match key %d", step, i, i)
+			equal(t, []byte("payload"), plain, step)
+		}
+		if !bytes.Equal(keys[0], ring.GetPrimaryKey()) || aeads[0] != ring.primaryAEAD() {
+			t.Fatalf("%s: primary cipher is not the primary key's", step)
+		}
+	}
+	check("new")
+	noErr(t, ring.AddKey(k3))
+	check("add")
+	noErr(t, ring.UseKey(k3))
+	check("use")
+	noErr(t, ring.RemoveKey(k1))
+	check("remove")
+}

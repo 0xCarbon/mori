@@ -20,10 +20,10 @@ GO_FILES = $(shell find . -name '*.go' -not -path './.git/*' -not -path './proje
 # Cross targets are compiled and vetted; tests execute on the host only.
 CROSS_TARGETS := linux/386 linux/arm64 darwin/arm64 windows/amd64 freebsd/amd64
 
-.PHONY: ci check fmt fmt-check fix modernize-check vet lint build cross check-deps test race integ subnet cov bench fuzz-smoke modernize tidy-check help
+.PHONY: bench-smoke ci check fmt fmt-check fix modernize-check vet lint build cross check-deps test race integ subnet cov bench fuzz-smoke modernize tidy-check help
 
 help:
-	@echo "make ci           all gates: fmt, modernize, vet, lint, build, cross, deps, tidy, test, race"
+	@echo "make ci           all gates: fmt, modernize, vet, lint, build, cross, deps, tidy, test, race, bench-smoke"
 	@echo "make check        fast static gates (no tests)"
 	@echo "make test         full suite, CGO_ENABLED=0"
 	@echo "make race         full suite under the race detector (cgo exception)"
@@ -32,7 +32,7 @@ help:
 	@echo "make modernize    optional: golang-modernization skill gate (go-modernize on PATH)"
 	@echo "make fix          apply go fix modernizations and gofmt"
 
-ci: check tidy-check test race
+ci: check tidy-check test race bench-smoke
 
 check: fmt-check modernize-check vet lint build cross check-deps
 
@@ -95,6 +95,10 @@ cov:
 # project/goal.md for the evidence rules.
 BENCH ?= .
 BENCH_COUNT ?= 10
+# Every benchmark once, so they cannot rot between measurement campaigns.
+bench-smoke:
+	$(GO) test -run '^$$' -bench . -benchtime 1x ./... > /dev/null
+
 bench:
 	@mkdir -p dist
 	$(GO) test -run '^$$' -bench '$(BENCH)' -benchmem -count=$(BENCH_COUNT) ./... | tee dist/bench.txt

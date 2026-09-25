@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/0xCarbon/mori/internal/msgpack"
@@ -185,42 +186,35 @@ OUTER:
 // makeCompoundMessages takes a list of messages and packs
 // them into one or multiple messages based on the limitations
 // of compound messages (255 messages each).
-func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
+func makeCompoundMessages(msgs [][]byte) [][]byte {
 	const maxMsgs = 255
-	bufs := make([]*bytes.Buffer, 0, (len(msgs)+(maxMsgs-1))/maxMsgs)
+	out := make([][]byte, 0, (len(msgs)+(maxMsgs-1))/maxMsgs)
 
 	for ; len(msgs) > maxMsgs; msgs = msgs[maxMsgs:] {
-		bufs = append(bufs, makeCompoundMessage(msgs[:maxMsgs]))
+		out = append(out, makeCompoundMessage(msgs[:maxMsgs]))
 	}
 	if len(msgs) > 0 {
-		bufs = append(bufs, makeCompoundMessage(msgs))
+		out = append(out, makeCompoundMessage(msgs))
 	}
-
-	return bufs
+	return out
 }
 
 // makeCompoundMessage takes a list of messages and generates
-// a single compound message containing all of them
-func makeCompoundMessage(msgs [][]byte) *bytes.Buffer {
-	// Create a local buffer
-	buf := bytes.NewBuffer(nil)
-
-	// Write out the type
-	buf.WriteByte(uint8(compoundMsg))
-
-	// Write out the number of message
-	buf.WriteByte(uint8(len(msgs)))
-
-	// Add the message lengths
+// a single compound message containing all of them: the type, the part
+// count, a big-endian uint16 length per part, then the parts.
+func makeCompoundMessage(msgs [][]byte) []byte {
+	size := 2 + 2*len(msgs)
 	for _, m := range msgs {
-		_ = binary.Write(buf, binary.BigEndian, uint16(len(m)))
+		size += len(m)
 	}
-
-	// Append the messages
+	buf := make([]byte, 0, size)
+	buf = append(buf, uint8(compoundMsg), uint8(len(msgs)))
 	for _, m := range msgs {
-		buf.Write(m)
+		buf = binary.BigEndian.AppendUint16(buf, uint16(len(m)))
 	}
-
+	for _, m := range msgs {
+		buf = append(buf, m...)
+	}
 	return buf
 }
 
@@ -263,19 +257,35 @@ func decodeCompoundMessage(buf []byte) (trunc int, parts [][]byte, err error) {
 	return
 }
 
+// maxIncompressiblePacket is the largest message LZW compression can never
+// shrink, so rawSendMsgPacket skips compressing it: its result would be
+// discarded anyway. Bound: the i-th LZW code covers at most i bytes, so n
+// bytes need k codes with k(k+1)/2 >= n, each 9 bits wide plus a 9-bit end
+// code, inside a 13-byte compress envelope (type, map header, "Algo",
+// algorithm, "Buf", string header): 13 + ceil(9(k+1)/8) >= n for n <= 22.
+const maxIncompressiblePacket = 22
+
+// LZW coders are pooled: each allocates tables of tens of kilobytes, which
+// used to dominate the cost of sending a compressed packet.
+var (
+	lzwWriters = sync.Pool{New: func() any { return lzw.NewWriter(nil, lzw.LSB, lzwLitWidth) }}
+	lzwReaders = sync.Pool{New: func() any { return lzw.NewReader(nil, lzw.LSB, lzwLitWidth) }}
+)
+
 // compressPayload takes an opaque input buffer, compresses it
 // and wraps it in a compress{} message that is encoded.
 func compressPayload(inp []byte) ([]byte, error) {
 	var buf bytes.Buffer
-	compressor := lzw.NewWriter(&buf, lzw.LSB, lzwLitWidth)
+	buf.Grow(len(inp)/2 + 16)
+	w := lzwWriters.Get().(*lzw.Writer)
+	w.Reset(&buf, lzw.LSB, lzwLitWidth)
+	defer lzwWriters.Put(w)
 
-	_, err := compressor.Write(inp)
-	if err != nil {
+	if _, err := w.Write(inp); err != nil {
 		return nil, err
 	}
-
 	// Ensure we flush everything out
-	if err := compressor.Close(); err != nil {
+	if err := w.Close(); err != nil {
 		return nil, err
 	}
 
@@ -307,16 +317,18 @@ func decompressBuffer(c *compress, limit int) ([]byte, error) {
 		return nil, fmt.Errorf("cannot decompress unknown algorithm %d", c.Algo)
 	}
 
-	// Create a uncompressor
-	uncomp := lzw.NewReader(bytes.NewReader(c.Buf), lzw.LSB, lzwLitWidth)
+	r := lzwReaders.Get().(*lzw.Reader)
+	r.Reset(bytes.NewReader(c.Buf), lzw.LSB, lzwLitWidth)
 	defer func() {
-		_ = uncomp.Close()
+		_ = r.Close()
+		lzwReaders.Put(r)
 	}()
 
 	// Read at most one byte past the limit, so an oversized payload is
 	// detected without being materialized.
 	var b bytes.Buffer
-	n, err := io.CopyN(&b, uncomp, int64(limit)+1)
+	b.Grow(min(4*len(c.Buf), limit+1))
+	n, err := io.CopyN(&b, r, int64(limit)+1)
 	if err != nil && err != io.EOF {
 		return nil, err
 	}
