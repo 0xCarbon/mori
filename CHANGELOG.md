@@ -1,11 +1,17 @@
 ## Unreleased
 
+## v0.8.1 (Mori)
+
+A bug-fix release for v0.8.0: unencrypted push/pull states of about 28 to
+40 MiB with incompressible content are accepted again, oversize stream
+messages fail on the sender with `ErrMessageTooLarge`, and stream messages
+go out compressed only when that makes them smaller. The wire protocol is
+unchanged.
+
 ### Improvements
 
 * `CONTRIBUTING.md` and an updated pull request template (adapted from
   upstream hashicorp/memberlist #375).
-
-### Changes
 
 ### Fixed
 
