@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -173,60 +174,46 @@ func (tw testCountingWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// TestTransport_TcpListenBackoff tests that AcceptTCP() errors in NetTransport#tcpListen()
-// do not result in a tight loop and spam the log. We verify this here by counting the number
-// of entries logged in a given time period.
+// TestTransport_TcpListenBackoff tests that AcceptTCP() errors in
+// NetTransport#tcpListen() do not result in a tight loop and spam the log.
+// It runs in a synctest bubble, so the count is exact: with delays doubling
+// from 5ms to a 1s cap, errors are logged at 0, 5, 15, 35, 75, 155, 315,
+// 635, 1275, 2275 and 3275ms — eleven within 4s — and the loop exits on
+// its next wake-up (4275ms) after shutdown is flagged.
 func TestTransport_TcpListenBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var numCalls int32
+		countingWriter := testCountingWriter{t, &numCalls}
+		countingLogger := slog.New(slog.NewTextHandler(countingWriter, nil))
+		transport := NetTransport{
+			streamCh: make(chan net.Conn),
+			logger:   countingLogger,
+		}
+		transport.wg.Add(1)
 
-	// testTime is the amount of time we will allow NetTransport#tcpListen() to run
-	// This needs to be long enough that to verify that maxDelay is in force,
-	// but not so long as to be obnoxious when running the test suite.
-	const testTime = 4 * time.Second
+		// create a listener that will cause AcceptTCP calls to fail
+		listener, err := net.ListenTCP("tcp", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := listener.Close(); err != nil {
+			t.Fatalf("not able to close the listener: %v", err)
+		}
+		go transport.tcpListen(listener)
 
-	var numCalls int32
-	countingWriter := testCountingWriter{t, &numCalls}
-	countingLogger := slog.New(slog.NewTextHandler(countingWriter, nil))
-	transport := NetTransport{
-		streamCh: make(chan net.Conn),
-		logger:   countingLogger,
-	}
-	transport.wg.Add(1)
+		time.Sleep(4 * time.Second)
+		transport.shutdown.Store(1)
 
-	// create a listener that will cause AcceptTCP calls to fail
-	listener, _ := net.ListenTCP("tcp", nil)
-	if err := listener.Close(); err != nil {
-		t.Fatalf("not able to close the listener: %v", err)
-	}
-	go transport.tcpListen(listener)
-
-	// sleep (+yield) for testTime seconds before asking the accept loop to shut down
-	time.Sleep(testTime)
-	transport.shutdown.Store(1)
-
-	// Verify that the wg was completed on exit (but without blocking this test)
-	// maxDelay == 1s, so we will give the routine 1.25s to loop around and shut down.
-	c := make(chan struct{})
-	go func() {
-		defer close(c)
+		start := time.Now()
 		transport.wg.Wait()
-	}()
-	select {
-	case <-c:
-	case <-time.After(1250 * time.Millisecond):
-		t.Error("timed out waiting for transport waitgroup to be done after flagging shutdown")
-	}
+		if waited := time.Since(start); waited != 275*time.Millisecond {
+			t.Errorf("accept loop exited %v after shutdown, want 275ms (its next wake-up)", waited)
+		}
+		if n := atomic.LoadInt32(&numCalls); n != 11 {
+			t.Errorf("logged %d accept errors in 4s, want 11", n)
+		}
 
-	// In testTime==4s, we expect to loop approximately 12 times (and log approximately 11 errors),
-	// with the following delays (in ms):
-	//   0+5+10+20+40+80+160+320+640+1000+1000+1000 == 4275 ms
-	// Too few calls suggests that the minDelay is not in force; too many calls suggests that the
-	// maxDelay is not in force or that the back-off isn't working at all.
-	// We'll leave a little flex; the important thing here is the asymptotic behavior.
-	// If the minDelay or maxDelay in NetTransport#tcpListen() are modified, this test may fail
-	// and need to be adjusted.
-	isTrue(t, numCalls > 8)
-	isTrue(t, numCalls < 14)
-
-	// no connections should have been accepted and sent to the channel
-	equal(t, len(transport.streamCh), 0)
+		// no connections should have been accepted and sent to the channel
+		equal(t, 0, len(transport.streamCh))
+	})
 }

@@ -57,7 +57,7 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
 | W3 | Small deps: go-multierror, sean-/seed, go-sockaddr, miekg/dns, google/btree | done |
 | W4 | Telemetry: `Config.Metrics` sink replaces go-metrics; `log/slog` replaces `log` | done |
 | W5 | Wire codec: `internal/msgpack` + `internal/wire`, golden vectors, differential evidence; drop go-msgpack | done |
-| W6 | Tests: testify/goleak -> std; synctest for timer-driven tests; flake removal | pending |
+| W6 | Tests: testify/goleak -> std; synctest for timer-driven tests; flake removal | done |
 | W7 | Performance: UDP receive buffer reuse, encode/decode allocations, benchmarks + evidence | pending |
 | W8 | Fuzz targets, SECURITY.md threat model, README/CHANGELOG v0.8.0, independent review | pending |
 
@@ -124,6 +124,12 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
   goroutine diff (self-tested). go.mod has zero requirements; ratchet file
   deleted; checkdeps now enforces the final policy (root module requires
   nothing; nested modules only under tools/ with x/ or 0xCarbon deps).
+
+- 2026-09-25 W6b: simnet_test.go (in-memory UDP/TCP semantics, latency)
+  + testing/synctest: 11 timing tests now exact and instant. Suite 42 s ->
+  5.2 s, race 51 s -> 10.4 s; -count=5 and race -count=3 clean. Mutation
+  check: 1 ms timeout shift and missing awareness scaling both caught
+  (evidence/w6-tests).
 
 ## Findings to fix (discovered during the waves)
 

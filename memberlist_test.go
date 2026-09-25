@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	iretry "github.com/0xCarbon/mori/internal/retry"
@@ -1207,89 +1208,33 @@ func TestMemberlist_delegateMeta(t *testing.T) {
 }
 
 func TestMemberlist_delegateMeta_Update(t *testing.T) {
-	c1 := testConfig(t)
-	mock1 := &MockDelegate{meta: []byte("web")}
-	c1.Delegate = mock1
+	synctest.Test(t, func(t *testing.T) {
+		n := newSimNet()
+		mock1 := &MockDelegate{meta: []byte("web")}
+		m1 := simCreate(t, n, 1, func(c *Config) { c.Delegate = mock1 })
+		mock2 := &MockDelegate{meta: []byte("lb")}
+		m2 := simCreate(t, n, 2, func(c *Config) { c.Delegate = mock2 })
 
-	m1, err := Create(c1)
-	noErr(t, err)
-	defer func() {
-		if err := m1.Shutdown(); err != nil {
-			t.Fatal(err)
+		_, err := m1.Join([]string{m2.config.Name + "/" + m2.config.BindAddr})
+		noErr(t, err)
+		yield()
+
+		// Update the meta data roles
+		mock1.setMeta([]byte("api"))
+		mock2.setMeta([]byte("db"))
+		noErr(t, m1.UpdateNode(0))
+		noErr(t, m2.UpdateNode(0))
+		yield()
+
+		// Both members see both updates.
+		for _, m := range []*Memberlist{m1, m2} {
+			roles := map[string]string{}
+			for _, node := range m.Members() {
+				roles[node.Name] = string(node.Meta)
+			}
+			equal(t, map[string]string{"node1": "api", "node2": "db"}, roles, "roles seen by %s", m.config.Name)
 		}
-	}()
-
-	bindPort := m1.config.BindPort
-
-	c2 := testConfig(t)
-	c2.BindPort = bindPort
-	mock2 := &MockDelegate{meta: []byte("lb")}
-	c2.Delegate = mock2
-
-	m2, err := Create(c2)
-	noErr(t, err)
-	defer func() {
-		if err := m2.Shutdown(); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	_, err = m1.Join([]string{c2.Name + "/" + c2.BindAddr})
-	noErr(t, err)
-
-	yield()
-
-	// Update the meta data roles
-	mock1.setMeta([]byte("api"))
-	mock2.setMeta([]byte("db"))
-
-	err = m1.UpdateNode(0)
-	noErr(t, err)
-	err = m2.UpdateNode(0)
-	noErr(t, err)
-
-	yield()
-
-	// Check the updates have propagated
-	var roles map[string]string
-
-	// Check the roles of members of m1
-	m1m := m1.Members()
-	if len(m1m) != 2 {
-		t.Fatalf("bad: %#v", m1m)
-	}
-
-	roles = make(map[string]string)
-	for _, m := range m1m {
-		roles[m.Name] = string(m.Meta)
-	}
-
-	if r := roles[c1.Name]; r != "api" {
-		t.Fatalf("bad role for %s: %s", c1.Name, r)
-	}
-
-	if r := roles[c2.Name]; r != "db" {
-		t.Fatalf("bad role for %s: %s", c2.Name, r)
-	}
-
-	// Check the roles of members of m2
-	m2m := m2.Members()
-	if len(m2m) != 2 {
-		t.Fatalf("bad: %#v", m2m)
-	}
-
-	roles = make(map[string]string)
-	for _, m := range m2m {
-		roles[m.Name] = string(m.Meta)
-	}
-
-	if r := roles[c1.Name]; r != "api" {
-		t.Fatalf("bad role for %s: %s", c1.Name, r)
-	}
-
-	if r := roles[c2.Name]; r != "db" {
-		t.Fatalf("bad role for %s: %s", c2.Name, r)
-	}
+	})
 }
 
 func TestMemberlist_UserData(t *testing.T) {
@@ -1929,44 +1874,6 @@ func waitUntilSizeAndEstimate(t *testing.T, m *Memberlist, expected int) {
 	})
 }
 
-func isPortFree(t *testing.T, addr string, port int) error {
-	t.Helper()
-
-	ip := net.ParseIP(addr)
-	tcpAddr := &net.TCPAddr{IP: ip, Port: port}
-	tcpLn, err := net.ListenTCP("tcp", tcpAddr)
-	if err != nil {
-		return err
-	}
-	if err := tcpLn.Close(); err != nil {
-		return err
-	}
-
-	udpAddr := &net.UDPAddr{IP: ip, Port: port}
-	udpLn, err := net.ListenUDP("udp", udpAddr)
-	if err != nil {
-		return err
-	}
-
-	return udpLn.Close()
-}
-
-func waitUntilPortIsFree(t *testing.T, m *Memberlist) {
-	t.Helper()
-
-	// wait until we know for certain that m1 is dead dead
-	addr := m.config.BindAddr
-	port := m.config.BindPort
-
-	retry(t, 15, 250*time.Millisecond, func(failf func(string, ...any)) {
-		t.Helper()
-
-		if err := isPortFree(t, addr, port); err != nil {
-			failf("%s port is not yet free", m.config.Name)
-		}
-	})
-}
-
 // This test should follow the recommended upgrade guide:
 // https://www.consul.io/docs/agent/encryption.html#configuring-gossip-encryption-on-an-existing-cluster
 //
@@ -1976,236 +1883,74 @@ func waitUntilPortIsFree(t *testing.T, m *Memberlist) {
 // 1. Set an encryption key and set GossipVerifyIncoming=false and GossipVerifyOutgoing=false to all nodes.
 // 2. Change GossipVerifyOutgoing=true to all nodes.
 // 3. Change GossipVerifyIncoming=true to all nodes.
+// TestMemberlist_EncryptedGossipTransition walks a two-node cluster
+// through the three-stage upshift to encrypted gossip (verify incoming and
+// outgoing off, then outgoing on, then both on), restarting each node at
+// its address at every stage. It runs in a synctest bubble on a simulated
+// network.
 func TestMemberlist_EncryptedGossipTransition(t *testing.T) {
-	// ensure these all get the same general set of customizations
-	pretty := make(map[string]string) // addr->shortName
-	newConfig := func(shortName string, addr string) *Config {
-		t.Helper()
-
-		conf := DefaultLANConfig()
-		if addr == "" {
-			addr = getBindAddr().String()
+	synctest.Test(t, func(t *testing.T) {
+		n := newSimNet()
+		key := []byte("Hi16ZXu2lNCRVwtr20khAg==")
+		stage := func(verifyIn, verifyOut bool, secret []byte) func(*Config) {
+			return func(c *Config) {
+				c.GossipInterval = 100 * time.Millisecond
+				c.SecretKey = secret
+				c.GossipVerifyIncoming = verifyIn
+				c.GossipVerifyOutgoing = verifyOut
+			}
 		}
-		conf.Name = addr
-		// conf.Name = shortName
-		conf.BindAddr = addr
-		conf.BindPort = 0
-		// Set the gossip interval fast enough to get a reasonable test,
-		// but slow enough to avoid "sendto: operation not permitted"
-		conf.GossipInterval = 100 * time.Millisecond
-		conf.Logger = testLogger(t, shortName)
 
-		pretty[conf.Name] = shortName
-		return conf
-	}
-
-	var bindPort int
-	createOK := func(conf *Config) *Memberlist {
-		t.Helper()
-
-		if bindPort > 0 {
-			conf.BindPort = bindPort
+		joinOK := func(src, dst *Memberlist) {
+			t.Helper()
+			num, err := src.Join([]string{dst.config.Name + "/" + dst.config.BindAddr})
+			noErr(t, err)
+			equal(t, 1, num)
+			for _, m := range []*Memberlist{src, dst} {
+				waitUntilSize(t, m, 2)
+				equal(t, 2, len(m.Members()), "nodes: %v", m.Members())
+				equal(t, 2, m.estNumNodes(), "nodes: %v", m.Members())
+			}
 		}
-		m, err := Create(conf)
-		noErr(t, err)
-
-		if bindPort == 0 {
-			bindPort = m.config.BindPort
+		// restart has m leave and shut down, then starts node i again
+		// with the stage's settings and joins it to the bystander.
+		restart := func(m, bystander *Memberlist, i int, settings func(*Config)) *Memberlist {
+			t.Helper()
+			noErr(t, m.Leave(time.Second))
+			waitUntilSize(t, bystander, 1)
+			noErr(t, m.Shutdown())
+			waitUntilSize(t, bystander, 1)
+			next := simCreate(t, n, i, settings)
+			joinOK(next, bystander)
+			return next
 		}
-		return m
-	}
 
-	joinOK := func(src, dst *Memberlist, numNodes int) {
-		t.Helper()
+		// Stage 0: a two-node unencrypted cluster.
+		plain := stage(true, true, nil)
+		m0 := simCreate(t, n, 0+1, plain)
+		m1 := simCreate(t, n, 1+1, plain)
+		joinOK(m1, m0)
 
-		srcName, dstName := pretty[src.config.Name], pretty[dst.config.Name]
-		t.Logf("Node %s[%s] joining node %s[%s]", srcName, src.config.Name, dstName, dst.config.Name)
+		// Stage 1: keys installed, nothing verified or encrypted yet.
+		m0 = restart(m0, m1, 1, stage(false, false, key))
+		m1 = restart(m1, m0, 2, stage(false, false, key))
 
-		num, err := src.Join([]string{dst.config.Name + "/" + dst.config.BindAddr})
-		noErr(t, err)
-		equal(t, 1, num)
+		// Stage 2: outgoing gossip encrypted, incoming not yet enforced.
+		m0 = restart(m0, m1, 1, stage(false, true, key))
+		m1 = restart(m1, m0, 2, stage(false, true, key))
 
-		waitUntilSize(t, src, numNodes)
-		waitUntilSize(t, dst, numNodes)
+		// Stage 3: fully enforced.
+		m0 = restart(m0, m1, 1, stage(true, true, key))
+		m1 = restart(m1, m0, 2, stage(true, true, key))
 
-		// Check the hosts
-		equal(t, numNodes, len(src.Members()), "nodes: %v", src.Members())
-		equal(t, numNodes, src.estNumNodes(), "nodes: %v", src.Members())
-		equal(t, numNodes, len(dst.Members()), "nodes: %v", dst.Members())
-		equal(t, numNodes, dst.estNumNodes(), "nodes: %v", dst.Members())
-	}
-
-	leaveOK := func(m *Memberlist, why string) {
-		t.Helper()
-
-		name := pretty[m.config.Name]
-		t.Logf("Node %s[%s] is leaving %s", name, m.config.Name, why)
-		err := m.Leave(time.Second)
-		noErr(t, err)
-	}
-
-	shutdownOK := func(m *Memberlist, why string) {
-		t.Helper()
-
-		name := pretty[m.config.Name]
-		t.Logf("Node %s[%s] is shutting down %s", name, m.config.Name, why)
-		err := m.Shutdown()
-		noErr(t, err)
-
-		// Double check that it genuinely shutdown.
-		waitUntilPortIsFree(t, m)
-	}
-
-	leaveAndShutdown := func(leaver, bystander *Memberlist, why string) {
-		t.Helper()
-
-		leaveOK(leaver, why)
-		waitUntilSize(t, bystander, 1)
-		shutdownOK(leaver, why)
-		waitUntilSize(t, bystander, 1)
-	}
-
-	// ==== STEP 0 ====
-
-	// Create a first cluster of 2 nodes with no gossip encryption settings.
-	conf0 := newConfig("m0", "")
-	m0 := createOK(conf0)
-	defer func() {
-		if err := m0.Shutdown(); err != nil {
-			t.Fatal(err)
+		// Control: a plaintext node cannot join the locked-down cluster,
+		// so the stages above really exercised encryption.
+		outsider := simCreate(t, n, 3, plain)
+		if _, err := outsider.Join([]string{m0.config.Name + "/" + m0.config.BindAddr}); err == nil {
+			t.Fatal("a plaintext node joined an encryption-enforcing cluster")
 		}
-	}()
-
-	conf1 := newConfig("m1", "")
-	m1 := createOK(conf1)
-	defer func() {
-		if err := m1.Shutdown(); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	joinOK(m1, m0, 2)
-
-	t.Logf("==== STEP 0 complete: two node unencrypted cluster ====")
-
-	// ==== STEP 1 ====
-
-	// Take down m0, upgrade to first stage of gossip transition settings.
-	leaveAndShutdown(m0, m1, "to upgrade gossip to first stage")
-
-	// Resurrect the first node with the first stage of gossip transition settings.
-	conf0 = newConfig("m0", m0.config.BindAddr)
-	conf0.SecretKey = []byte("Hi16ZXu2lNCRVwtr20khAg==")
-	conf0.GossipVerifyIncoming = false
-	conf0.GossipVerifyOutgoing = false
-	m0 = createOK(conf0)
-	defer func() {
-		if err := m0.Shutdown(); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	// Join the second node. m1 has no encryption while m0 has encryption configured and
-	// can receive encrypted gossip, but will not encrypt outgoing gossip.
-	joinOK(m0, m1, 2)
-
-	leaveAndShutdown(m1, m0, "to upgrade gossip to first stage")
-
-	// Resurrect the second node with the first stage of gossip transition settings.
-	conf1 = newConfig("m1", m1.config.BindAddr)
-	conf1.SecretKey = []byte("Hi16ZXu2lNCRVwtr20khAg==")
-	conf1.GossipVerifyIncoming = false
-	conf1.GossipVerifyOutgoing = false
-	m1 = createOK(conf1)
-	defer func() {
-		if err := m1.Shutdown(); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	// Join the first node. Both have encryption configured and can receive
-	// encrypted gossip, but will not encrypt outgoing gossip.
-	joinOK(m1, m0, 2)
-
-	t.Logf("==== STEP 1 complete: two node encryption-aware cluster ====")
-
-	// ==== STEP 2 ====
-
-	// Take down m0, upgrade to second stage of gossip transition settings.
-	leaveAndShutdown(m0, m1, "to upgrade gossip to second stage")
-
-	// Resurrect the first node with the second stage of gossip transition settings.
-	conf0 = newConfig("m0", m0.config.BindAddr)
-	conf0.SecretKey = []byte("Hi16ZXu2lNCRVwtr20khAg==")
-	conf0.GossipVerifyIncoming = false
-	m0 = createOK(conf0)
-	defer func() {
-		if err := m0.Shutdown(); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	// Join the second node. At this step, both nodes have encryption
-	// configured but only m0 is sending encrypted gossip.
-	joinOK(m0, m1, 2)
-
-	leaveAndShutdown(m1, m0, "to upgrade gossip to second stage")
-
-	// Resurrect the second node with the second stage of gossip transition settings.
-	conf1 = newConfig("m1", m1.config.BindAddr)
-	conf1.SecretKey = []byte("Hi16ZXu2lNCRVwtr20khAg==")
-	conf1.GossipVerifyIncoming = false
-	m1 = createOK(conf1)
-	defer func() {
-		if err := m1.Shutdown(); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	// Join the first node. Both have encryption configured and can receive
-	// encrypted gossip, and encrypt outgoing gossip, but aren't forcing
-	// incoming gossip is encrypted.
-	joinOK(m1, m0, 2)
-
-	t.Logf("==== STEP 2 complete: two node encryption-aware cluster being encrypted ====")
-
-	// ==== STEP 3 ====
-
-	// Take down m0, upgrade to final stage of gossip transition settings.
-	leaveAndShutdown(m0, m1, "to upgrade gossip to final stage")
-
-	// Resurrect the first node with the final stage of gossip transition settings.
-	conf0 = newConfig("m0", m0.config.BindAddr)
-	conf0.SecretKey = []byte("Hi16ZXu2lNCRVwtr20khAg==")
-	m0 = createOK(conf0)
-	defer func() {
-		if err := m0.Shutdown(); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	// Join the second node. At this step, both nodes have encryption
-	// configured and are sending it, bu tonly m0 is verifying inbound gossip
-	// is encrypted.
-	joinOK(m0, m1, 2)
-
-	leaveAndShutdown(m1, m0, "to upgrade gossip to final stage")
-
-	// Resurrect the second node with the final stage of gossip transition settings.
-	conf1 = newConfig("m1", m1.config.BindAddr)
-	conf1.SecretKey = []byte("Hi16ZXu2lNCRVwtr20khAg==")
-	m1 = createOK(conf1)
-	defer func() {
-		if err := m1.Shutdown(); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	// Join the first node. Both have encryption configured and fully in
-	// enforcement.
-	joinOK(m1, m0, 2)
-
-	t.Logf("==== STEP 3 complete: two node encrypted cluster locked down ====")
+		equal(t, 2, m1.NumMembers())
+	})
 }
 
 // Consul bug, rapid restart (before failure detection),
