@@ -1661,14 +1661,15 @@ func TestMemberlist_Join_IPv6(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, num)
 
-	// Check the hosts
+	// Check the hosts. m1 merges after replying, so it may lag Join.
 	if len(m2.Members()) != 2 {
 		t.Fatalf("should have 2 nodes! %v", m2.Members())
 	}
-
-	if len(m1.Members()) != 2 {
-		t.Fatalf("should have 2 nodes! %v", m2.Members())
-	}
+	iretry.Run(t, func(r *iretry.R) {
+		if len(m1.Members()) != 2 {
+			r.Fatalf("should have 2 nodes! %v", m1.Members())
+		}
+	})
 }
 
 func reservePort(t *testing.T, ip net.IP, purpose string) int {

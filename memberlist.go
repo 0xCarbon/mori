@@ -688,11 +688,7 @@ func (m *Memberlist) validateMetaMaxSize() error {
 		Meta:        make([]byte, limit),
 		Vsn:         m.config.BuildVsnArray(),
 	}
-	buf, err := encode(aliveMsg, &a, m.config.MsgpackUseNewTimeFormat)
-	if err != nil {
-		return fmt.Errorf("memberlist: could not size a full alive message: %w", err)
-	}
-	if msgSize := buf.Len(); msgSize > budget {
+	if msgSize := len(encode(aliveMsg, a)); msgSize > budget {
 		return fmt.Errorf("memberlist: MetaMaxSize %d does not fit the transport packet budget: a full-size alive message is %d bytes but only %d are available (UDPBufferSize or the transport's MaxPacketSize, minus gossip framing, CRC, label and encryption overhead)",
 			limit, msgSize, budget)
 	}

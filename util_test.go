@@ -42,12 +42,9 @@ func TestUtil_PortFunctions(t *testing.T) {
 
 func TestEncodeDecode(t *testing.T) {
 	msg := &ping{SeqNo: 100}
-	buf, err := encode(pingMsg, msg, false)
-	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
-	}
+	buf := encode(pingMsg, msg)
 	var out ping
-	if err := decode(buf.Bytes()[1:], &out); err != nil {
+	if err := decode(buf[1:], &out); err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
 	if msg.SeqNo != out.SeqNo {
@@ -329,27 +326,21 @@ func TestKRandomNodes(t *testing.T) {
 
 func TestMakeCompoundMessage(t *testing.T) {
 	msg := &ping{SeqNo: 100}
-	buf, err := encode(pingMsg, msg, false)
-	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
-	}
+	buf := encode(pingMsg, msg)
 
-	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
+	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
 
-	if compound.Len() != 3*buf.Len()+3*compoundOverhead+compoundHeaderOverhead {
+	if compound.Len() != 3*len(buf)+3*compoundOverhead+compoundHeaderOverhead {
 		t.Fatalf("bad len")
 	}
 }
 
 func TestDecodeCompoundMessage(t *testing.T) {
 	msg := &ping{SeqNo: 100}
-	buf, err := encode(pingMsg, msg, false)
-	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
-	}
+	buf := encode(pingMsg, msg)
 
-	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
+	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
 
 	trunc, parts, err := decodeCompoundMessage(compound.Bytes()[1:])
@@ -363,7 +354,7 @@ func TestDecodeCompoundMessage(t *testing.T) {
 		t.Fatalf("bad parts")
 	}
 	for _, p := range parts {
-		if len(p) != buf.Len() {
+		if len(p) != len(buf) {
 			t.Fatalf("bad part len")
 		}
 	}
@@ -378,12 +369,9 @@ func TestDecodeCompoundMessage_NumberOfPartsOverflow(t *testing.T) {
 
 func TestDecodeCompoundMessage_Trunc(t *testing.T) {
 	msg := &ping{SeqNo: 100}
-	buf, err := encode(pingMsg, msg, false)
-	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
-	}
+	buf := encode(pingMsg, msg)
 
-	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
+	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
 
 	trunc, parts, err := decodeCompoundMessage(compound.Bytes()[1:38])
@@ -397,19 +385,19 @@ func TestDecodeCompoundMessage_Trunc(t *testing.T) {
 		t.Fatalf("bad parts")
 	}
 	for _, p := range parts {
-		if len(p) != buf.Len() {
+		if len(p) != len(buf) {
 			t.Fatalf("bad part len")
 		}
 	}
 }
 
 func TestCompressDecompressPayload(t *testing.T) {
-	buf, err := compressPayload([]byte("testing"), false)
+	buf, err := compressPayload([]byte("testing"))
 	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
+		t.Fatal(err)
 	}
 
-	decomp, err := decompressPayload(buf.Bytes()[1:])
+	decomp, err := decompressPayload(buf[1:])
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
@@ -425,12 +413,12 @@ func TestCompressDecompressPayload(t *testing.T) {
 // budget, accept far less.
 func TestDecompressBufferLimit(t *testing.T) {
 	compressed := func(n int) *compress {
-		buf, err := compressPayload(make([]byte, n), false)
+		buf, err := compressPayload(make([]byte, n))
 		if err != nil {
 			t.Fatal(err)
 		}
 		var c compress
-		if err := decode(buf.Bytes()[1:], &c); err != nil {
+		if err := decode(buf[1:], &c); err != nil {
 			t.Fatal(err)
 		}
 		return &c
@@ -443,14 +431,14 @@ func TestDecompressBufferLimit(t *testing.T) {
 		t.Fatalf("stream payload within the limit: len %d, err %v", len(out), err)
 	}
 
-	bomb, err := compressPayload(make([]byte, maxPacketDecompressedBytes+1), false)
+	bomb, err := compressPayload(make([]byte, maxPacketDecompressedBytes+1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bomb.Bytes()) > 65507 {
-		t.Fatalf("test bomb does not fit one UDP payload: %d bytes", len(bomb.Bytes()))
+	if len(bomb) > 65507 {
+		t.Fatalf("test bomb does not fit one UDP payload: %d bytes", len(bomb))
 	}
-	if _, err := decompressPayload(bomb.Bytes()[1:]); err == nil {
+	if _, err := decompressPayload(bomb[1:]); err == nil {
 		t.Fatal("packet payload above maxPacketDecompressedBytes was accepted")
 	}
 }

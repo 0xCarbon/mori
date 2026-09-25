@@ -18,7 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hashicorp/go-msgpack/v2/codec"
+	"github.com/0xCarbon/mori/internal/msgpack"
+	"github.com/0xCarbon/mori/internal/wire"
 )
 
 // goid returns the current goroutine's id, parsed from the runtime stack
@@ -50,24 +51,19 @@ const (
 	lzwLitWidth = 8
 )
 
-// Decode reverses the encode operation on a byte slice input
-func decode(buf []byte, out any) error {
-	r := bytes.NewReader(buf)
-	hd := codec.MsgpackHandle{}
-	dec := codec.NewDecoder(r, &hd)
-	return dec.Decode(out)
+// messageDecoder is implemented by pointers to wire messages.
+type messageDecoder interface {
+	DecodeMsgpack(*msgpack.Decoder) error
 }
 
-// Encode writes an encoded object to a new bytes buffer
-func encode(msgType messageType, in any, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
-	buf := bytes.NewBuffer(nil)
-	buf.WriteByte(uint8(msgType))
-	hd := codec.MsgpackHandle{
-		TimeNotBuiltin: !msgpackUseNewTimeFormat}
+// decode reverses encode's MessagePack part on a byte slice.
+func decode(buf []byte, out messageDecoder) error {
+	return out.DecodeMsgpack(msgpack.NewDecoder(buf))
+}
 
-	enc := codec.NewEncoder(buf, &hd)
-	err := enc.Encode(in)
-	return buf, err
+// encode returns the message type byte followed by msg's encoding.
+func encode(msgType messageType, msg wire.Message) []byte {
+	return msg.AppendMsgpack(append(make([]byte, 0, 64), byte(msgType)))
 }
 
 // randomOffset returns a uniformly random offset in [0, n), or 0 when n is
@@ -269,7 +265,7 @@ func decodeCompoundMessage(buf []byte) (trunc int, parts [][]byte, err error) {
 
 // compressPayload takes an opaque input buffer, compresses it
 // and wraps it in a compress{} message that is encoded.
-func compressPayload(inp []byte, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
+func compressPayload(inp []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	compressor := lzw.NewWriter(&buf, lzw.LSB, lzwLitWidth)
 
@@ -285,10 +281,10 @@ func compressPayload(inp []byte, msgpackUseNewTimeFormat bool) (*bytes.Buffer, e
 
 	// Create a compressed message
 	c := compress{
-		Algo: lzwAlgo,
+		Algo: uint8(lzwAlgo),
 		Buf:  buf.Bytes(),
 	}
-	return encode(compressMsg, &c, msgpackUseNewTimeFormat)
+	return encode(compressMsg, c), nil
 }
 
 // decompressPayload is used to unpack an encoded compress{}
@@ -307,7 +303,7 @@ func decompressPayload(msg []byte) ([]byte, error) {
 // not exceed limit bytes.
 func decompressBuffer(c *compress, limit int) ([]byte, error) {
 	// Verify the algorithm
-	if c.Algo != lzwAlgo {
+	if compressionType(c.Algo) != lzwAlgo {
 		return nil, fmt.Errorf("cannot decompress unknown algorithm %d", c.Algo)
 	}
 

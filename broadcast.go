@@ -3,6 +3,8 @@
 
 package mori
 
+import "github.com/0xCarbon/mori/internal/wire"
+
 /*
 The broadcast mechanism works by maintaining a sorted list of messages to be
 sent out. When a message is to be broadcast, the retransmit count
@@ -48,22 +50,15 @@ func (b *memberlistBroadcast) Finished() {
 	}
 }
 
-// encodeAndBroadcast encodes a message and enqueues it for broadcast. Fails
-// silently if there is an encoding error.
-func (m *Memberlist) encodeAndBroadcast(node string, msgType messageType, msg any) {
+// encodeAndBroadcast encodes a message and enqueues it for broadcast.
+func (m *Memberlist) encodeAndBroadcast(node string, msgType messageType, msg wire.Message) {
 	m.encodeBroadcastNotify(node, msgType, msg, nil)
 }
 
 // encodeBroadcastNotify encodes a message and enqueues it for broadcast
-// and notifies the given channel when transmission is finished. Fails
-// silently if there is an encoding error.
-func (m *Memberlist) encodeBroadcastNotify(node string, msgType messageType, msg any, notify chan struct{}) {
-	buf, err := encode(msgType, msg, m.config.MsgpackUseNewTimeFormat)
-	if err != nil {
-		m.logger.Error("failed to encode message for broadcast", "error", err)
-	} else {
-		m.queueBroadcast(node, buf.Bytes(), notify)
-	}
+// and notifies the given channel when transmission is finished.
+func (m *Memberlist) encodeBroadcastNotify(node string, msgType messageType, msg wire.Message, notify chan struct{}) {
+	m.queueBroadcast(node, encode(msgType, msg), notify)
 }
 
 // queueBroadcast is used to start dissemination of a message. It will be

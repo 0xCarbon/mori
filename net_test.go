@@ -4,8 +4,8 @@
 package mori
 
 import (
+	"bufio"
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/go-msgpack/v2/codec"
+	"github.com/0xCarbon/mori/internal/msgpack"
 	"github.com/stretchr/testify/require"
 )
 
@@ -51,17 +51,14 @@ func TestHandleCompoundPing(t *testing.T) {
 		SourcePort: uint16(udpAddr.Port),
 		SourceNode: "test",
 	}
-	buf, err := encode(pingMsg, ping, m.config.MsgpackUseNewTimeFormat)
-	if err != nil {
-		t.Fatalf("unexpected err %s", err)
-	}
+	buf := encode(pingMsg, ping)
 
 	// Make a compound message
-	compound := makeCompoundMessage([][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()})
+	compound := makeCompoundMessage([][]byte{buf, buf, buf})
 
 	// Send compound version
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(compound.Bytes(), addr)
+	_, err := udp.WriteTo(compound.Bytes(), addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -128,14 +125,11 @@ func TestHandlePing(t *testing.T) {
 		SourcePort: uint16(udpAddr.Port),
 		SourceNode: "test",
 	}
-	buf, err := encode(pingMsg, ping, m.config.MsgpackUseNewTimeFormat)
-	if err != nil {
-		t.Fatalf("unexpected err %s", err)
-	}
+	buf := encode(pingMsg, ping)
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(buf.Bytes(), addr)
+	_, err := udp.WriteTo(buf, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -201,14 +195,11 @@ func TestHandlePing_WrongNode(t *testing.T) {
 		SourcePort: uint16(udpAddr.Port),
 		SourceNode: "test",
 	}
-	buf, err := encode(pingMsg, ping, m.config.MsgpackUseNewTimeFormat)
-	if err != nil {
-		t.Fatalf("unexpected err %s", err)
-	}
+	buf := encode(pingMsg, ping)
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(buf.Bytes(), addr)
+	_, err := udp.WriteTo(buf, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -253,14 +244,11 @@ func TestHandleIndirectPing(t *testing.T) {
 		SourcePort: uint16(udpAddr.Port),
 		SourceNode: "test",
 	}
-	buf, err := encode(indirectPingMsg, &ind, m.config.MsgpackUseNewTimeFormat)
-	if err != nil {
-		t.Fatalf("unexpected err %s", err)
-	}
+	buf := encode(indirectPingMsg, &ind)
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(buf.Bytes(), addr)
+	_, err := udp.WriteTo(buf, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -343,7 +331,7 @@ func TestTCPPing(t *testing.T) {
 			_ = conn.Close()
 		}()
 
-		msgType, _, dec, err := m.readStream(conn, "")
+		msgType, dec, err := m.readStream(conn, "")
 		if err != nil {
 			pingErrCh <- fmt.Errorf("failed to read ping: %s", err)
 			return
@@ -355,7 +343,7 @@ func TestTCPPing(t *testing.T) {
 		}
 
 		var pingIn ping
-		if err := dec.Decode(&pingIn); err != nil {
+		if err := pingIn.DecodeMsgpack(dec); err != nil {
 			pingErrCh <- fmt.Errorf("failed to decode ping: %s", err)
 			return
 		}
@@ -370,14 +358,9 @@ func TestTCPPing(t *testing.T) {
 			return
 		}
 
-		ack := ackResp{pingIn.SeqNo, nil}
-		out, err := encode(ackRespMsg, &ack, m.config.MsgpackUseNewTimeFormat)
-		if err != nil {
-			pingErrCh <- fmt.Errorf("failed to encode ack: %s", err)
-			return
-		}
-
-		err = m.rawSendMsgStream(conn, out.Bytes(), "")
+		ack := ackResp{SeqNo: pingIn.SeqNo}
+		out := encode(ackRespMsg, &ack)
+		err = m.rawSendMsgStream(conn, out, "")
 		if err != nil {
 			pingErrCh <- fmt.Errorf("failed to send ack: %s", err)
 			return
@@ -408,26 +391,21 @@ func TestTCPPing(t *testing.T) {
 			_ = conn.Close()
 		}()
 
-		_, _, dec, err := m.readStream(conn, "")
+		_, dec, err := m.readStream(conn, "")
 		if err != nil {
 			pingErrCh <- fmt.Errorf("failed to read ping: %s", err)
 			return
 		}
 
 		var pingIn ping
-		if err := dec.Decode(&pingIn); err != nil {
+		if err := pingIn.DecodeMsgpack(dec); err != nil {
 			pingErrCh <- fmt.Errorf("failed to decode ping: %s", err)
 			return
 		}
 
-		ack := ackResp{pingIn.SeqNo + 1, nil}
-		out, err := encode(ackRespMsg, &ack, m.config.MsgpackUseNewTimeFormat)
-		if err != nil {
-			pingErrCh <- fmt.Errorf("failed to encode ack: %s", err)
-			return
-		}
-
-		err = m.rawSendMsgStream(conn, out.Bytes(), "")
+		ack := ackResp{SeqNo: pingIn.SeqNo + 1}
+		out := encode(ackRespMsg, &ack)
+		err = m.rawSendMsgStream(conn, out, "")
 		if err != nil {
 			pingErrCh <- fmt.Errorf("failed to send ack: %s", err)
 			return
@@ -458,20 +436,15 @@ func TestTCPPing(t *testing.T) {
 			_ = conn.Close()
 		}()
 
-		_, _, _, err = m.readStream(conn, "")
+		_, _, err = m.readStream(conn, "")
 		if err != nil {
 			pingErrCh <- fmt.Errorf("failed to read ping: %s", err)
 			return
 		}
 
 		bogus := indirectPingReq{}
-		out, err := encode(indirectPingMsg, &bogus, m.config.MsgpackUseNewTimeFormat)
-		if err != nil {
-			pingErrCh <- fmt.Errorf("failed to encode bogus msg: %s", err)
-			return
-		}
-
-		err = m.rawSendMsgStream(conn, out.Bytes(), "")
+		out := encode(indirectPingMsg, &bogus)
+		err = m.rawSendMsgStream(conn, out, "")
 		if err != nil {
 			pingErrCh <- fmt.Errorf("failed to send bogus msg: %s", err)
 			return
@@ -539,53 +512,41 @@ func TestTCPPushPull(t *testing.T) {
 	localNodes[0].Addr = net.ParseIP(m.config.BindAddr)
 	localNodes[0].Port = uint16(m.config.BindPort)
 	localNodes[0].Incarnation = 1
-	localNodes[0].State = StateAlive
+	localNodes[0].State = int(StateAlive)
 	localNodes[1].Name = "Test 1"
 	localNodes[1].Addr = net.ParseIP(m.config.BindAddr)
 	localNodes[1].Port = uint16(m.config.BindPort)
 	localNodes[1].Incarnation = 1
-	localNodes[1].State = StateAlive
+	localNodes[1].State = int(StateAlive)
 	localNodes[2].Name = "Test 2"
 	localNodes[2].Addr = net.ParseIP(m.config.BindAddr)
 	localNodes[2].Port = uint16(m.config.BindPort)
 	localNodes[2].Incarnation = 1
-	localNodes[2].State = StateAlive
+	localNodes[2].State = int(StateAlive)
 
 	// Send our node state
 	header := pushPullHeader{Nodes: 3}
-	hd := codec.MsgpackHandle{
-		TimeNotBuiltin: !m.config.MsgpackUseNewTimeFormat}
-
-	enc := codec.NewEncoder(conn, &hd)
-
-	// Send the push/pull indicator
-	_, _ = conn.Write([]byte{byte(pushPullMsg)})
-
-	if err := enc.Encode(&header); err != nil {
-		t.Fatalf("unexpected err %s", err)
+	out := header.AppendMsgpack([]byte{byte(pushPullMsg)})
+	for i := range header.Nodes {
+		out = localNodes[i].AppendMsgpack(out)
 	}
-	for i := 0; i < header.Nodes; i++ {
-		if err := enc.Encode(&localNodes[i]); err != nil {
-			t.Fatalf("unexpected err %s", err)
-		}
+	if _, err := conn.Write(out); err != nil {
+		t.Fatalf("unexpected err %s", err)
 	}
 
 	// Read the message type
-	var msgType messageType
-	if err := binary.Read(conn, binary.BigEndian, &msgType); err != nil {
+	br := bufio.NewReader(conn)
+	b, err := br.ReadByte()
+	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
-
-	var bufConn io.Reader = conn
-	msghd := codec.MsgpackHandle{
-		TimeNotBuiltin: !m.config.MsgpackUseNewTimeFormat}
-
-	dec := codec.NewDecoder(bufConn, &msghd)
+	msgType := messageType(b)
+	dec := msgpack.NewStreamDecoder(br)
 
 	// Check if we have a compressed message
 	if msgType == compressMsg {
 		var c compress
-		if err := dec.Decode(&c); err != nil {
+		if err := c.DecodeMsgpack(dec); err != nil {
 			t.Fatalf("unexpected err %s", err)
 		}
 		decomp, err := decompressBuffer(&c, maxDecompressedBytes)
@@ -593,14 +554,9 @@ func TestTCPPushPull(t *testing.T) {
 			t.Fatalf("unexpected err %s", err)
 		}
 
-		// Reset the message type
+		// Reset the message type and decoder
 		msgType = messageType(decomp[0])
-
-		// Create a new bufConn
-		bufConn = bytes.NewReader(decomp[1:])
-
-		// Create a new decoder
-		dec = codec.NewDecoder(bufConn, &hd)
+		dec = msgpack.NewDecoder(decomp[1:])
 	}
 
 	// Quit if not push/pull
@@ -608,7 +564,7 @@ func TestTCPPushPull(t *testing.T) {
 		t.Fatalf("bad message type")
 	}
 
-	if err := dec.Decode(&header); err != nil {
+	if err := header.DecodeMsgpack(dec); err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
 
@@ -617,7 +573,7 @@ func TestTCPPushPull(t *testing.T) {
 
 	// Try to decode all the states
 	for i := 0; i < header.Nodes; i++ {
-		if err := dec.Decode(&remoteNodes[i]); err != nil {
+		if err := remoteNodes[i].DecodeMsgpack(dec); err != nil {
 			t.Fatalf("unexpected err %s", err)
 		}
 	}
@@ -636,7 +592,7 @@ func TestTCPPushPull(t *testing.T) {
 	if n.Incarnation != 0 {
 		t.Fatal("bad incarnation")
 	}
-	if n.State != StateSuspect {
+	if NodeStateType(n.State) != StateSuspect {
 		t.Fatal("bad state")
 	}
 }
@@ -678,14 +634,11 @@ func TestSendMsg_Piggyback(t *testing.T) {
 		SourcePort: uint16(udpAddr.Port),
 		SourceNode: "test",
 	}
-	buf, err := encode(pingMsg, ping, m.config.MsgpackUseNewTimeFormat)
-	if err != nil {
-		t.Fatalf("unexpected err %s", err)
-	}
+	buf := encode(pingMsg, ping)
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(buf.Bytes(), addr)
+	_, err := udp.WriteTo(buf, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -1033,13 +986,12 @@ func TestReadRemoteState_Limits(t *testing.T) {
 
 	t.Run("nodes", func(t *testing.T) {
 		msg := pushPullHeader{Nodes: 10_000_000, UserStateLen: 100, Join: false}
-		buf, err := encode(pushPullMsg, msg, m.config.MsgpackUseNewTimeFormat)
-		require.NoError(t, err)
+		buf := encode(pushPullMsg, msg)
 
 		conn, err := tr.DialTimeout(addr, time.Millisecond*100)
 		require.NoError(t, err)
 
-		err = m.rawSendMsgStream(conn, buf.Bytes(), "")
+		err = m.rawSendMsgStream(conn, buf, "")
 		require.NoError(t, err)
 
 		// conn closed: get nothing back
@@ -1052,13 +1004,12 @@ func TestReadRemoteState_Limits(t *testing.T) {
 
 	t.Run("user_state", func(t *testing.T) {
 		msg := pushPullHeader{Nodes: 0, UserStateLen: 30_000_000, Join: false}
-		buf, err := encode(pushPullMsg, msg, m.config.MsgpackUseNewTimeFormat)
-		require.NoError(t, err)
+		buf := encode(pushPullMsg, msg)
 
 		conn, err := tr.DialTimeout(addr, time.Millisecond*100)
 		require.NoError(t, err)
 
-		err = m.rawSendMsgStream(conn, buf.Bytes(), "")
+		err = m.rawSendMsgStream(conn, buf, "")
 		require.NoError(t, err)
 
 		// conn closed: get nothing back
@@ -1169,21 +1120,18 @@ func TestReadUserMsgLengthBounds(t *testing.T) {
 
 	for _, length := range []int{30_000_000, -1} {
 		t.Run(strconv.Itoa(length), func(t *testing.T) {
-			buf, err := encode(userMsg, &userMsgHeader{UserMsgLen: length}, false)
-			if err != nil {
-				t.Fatal(err)
-			}
+			buf := encode(userMsg, &userMsgHeader{UserMsgLen: length})
 			var readErr error
 			alloc := allocatedBytes(func() {
-				conn := streamFrom(t, append(buf.Bytes(), 1, 2, 3))
-				msgType, bufConn, dec, err := m.readStream(conn, "")
+				conn := streamFrom(t, append(buf, 1, 2, 3))
+				msgType, dec, err := m.readStream(conn, "")
 				if err != nil {
 					t.Fatalf("readStream: %v", err)
 				}
 				if msgType != userMsg {
 					t.Fatalf("message type %d, want %d", msgType, userMsg)
 				}
-				readErr = m.readUserMsg(bufConn, dec)
+				readErr = m.readUserMsg(dec)
 			})
 			if readErr == nil || !strings.Contains(readErr.Error(), "exceeds limit") {
 				t.Fatalf("readUserMsg error = %v, want a length-limit refusal", readErr)
@@ -1205,18 +1153,15 @@ func TestReadRemoteStateNodeCountDoesNotPreallocate(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = m.Shutdown() })
 
-	buf, err := encode(pushPullMsg, &pushPullHeader{Nodes: maxPushStateNodes}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	buf := encode(pushPullMsg, &pushPullHeader{Nodes: maxPushStateNodes})
 	var readErr error
 	alloc := allocatedBytes(func() {
-		conn := streamFrom(t, buf.Bytes())
-		_, bufConn, dec, err := m.readStream(conn, "")
+		conn := streamFrom(t, buf)
+		_, dec, err := m.readStream(conn, "")
 		if err != nil {
 			t.Fatalf("readStream: %v", err)
 		}
-		_, _, _, readErr = m.readRemoteState(bufConn, dec)
+		_, _, _, readErr = m.readRemoteState(dec)
 	})
 	if readErr == nil {
 		t.Fatal("truncated push/pull state was accepted")
@@ -1236,13 +1181,13 @@ func TestReadStreamEmptyInnerPayload(t *testing.T) {
 		})
 		t.Cleanup(func() { _ = m.Shutdown() })
 
-		buf, err := compressPayload(nil, false)
+		buf, err := compressPayload(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var readErr error
 		noPanic(t, "readStream", func() {
-			_, _, _, readErr = m.readStream(streamFrom(t, buf.Bytes()), "")
+			_, _, readErr = m.readStream(streamFrom(t, buf), "")
 		})
 		if readErr == nil {
 			t.Fatal("empty decompressed stream payload was accepted")
@@ -1263,7 +1208,7 @@ func TestReadStreamEmptyInnerPayload(t *testing.T) {
 		}
 		var readErr error
 		noPanic(t, "readStream", func() {
-			_, _, _, readErr = m.readStream(streamFrom(t, stream), "")
+			_, _, readErr = m.readStream(streamFrom(t, stream), "")
 		})
 		if readErr == nil {
 			t.Fatal("empty decrypted stream payload was accepted")
@@ -1285,11 +1230,11 @@ func TestHandleCommandRejectsNestedEnvelopes(t *testing.T) {
 
 	user := []byte{byte(userMsg), 'h', 'i'}
 	compress := func(b []byte) []byte {
-		out, err := compressPayload(b, false)
+		out, err := compressPayload(b)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return out.Bytes()
+		return out
 	}
 	compound := func(b []byte) []byte { return makeCompoundMessage([][]byte{b}).Bytes() }
 
@@ -1343,23 +1288,51 @@ func TestReadStreamBoundsPlainMessage(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = m.Shutdown() })
 
-	var stream bytes.Buffer
-	stream.WriteByte(byte(pushPullMsg))
-	hd := codec.MsgpackHandle{}
-	enc := codec.NewEncoder(&stream, &hd)
-	if err := enc.Encode(&pushPullHeader{Nodes: 1}); err != nil {
-		t.Fatal(err)
-	}
-	huge := pushNodeState{Name: "peer", Addr: []byte{127, 0, 0, 2}, Port: 7946, Meta: make([]byte, maxStreamMessageBytes), Vsn: []uint8{1, 5, 2, 0, 0, 0}}
-	if err := enc.Encode(&huge); err != nil {
-		t.Fatal(err)
+	// Every field is within wire.MaxFieldBytes; only the total exceeds
+	// the stream cap.
+	const nodes = maxStreamMessageBytes/(1<<20) + 1
+	stream := pushPullHeader{Nodes: nodes}.AppendMsgpack([]byte{byte(pushPullMsg)})
+	for i := range nodes {
+		n := pushNodeState{Name: fmt.Sprint("peer", i), Addr: []byte{127, 0, 0, 2}, Port: 7946, Meta: make([]byte, 1<<20-64), Vsn: []uint8{1, 5, 2, 0, 0, 0}}
+		stream = n.AppendMsgpack(stream)
 	}
 
-	_, bufConn, dec, err := m.readStream(streamFrom(t, stream.Bytes()), "")
+	_, dec, err := m.readStream(streamFrom(t, stream), "")
 	if err != nil {
 		t.Fatalf("readStream: %v", err)
 	}
-	if _, nodes, _, err := m.readRemoteState(bufConn, dec); err == nil {
+	if _, nodes, _, err := m.readRemoteState(dec); err == nil {
 		t.Fatalf("stream message above maxStreamMessageBytes was accepted (%d nodes)", len(nodes))
+	}
+}
+
+// TestSizeLocalGaugeIsMessageSize covers finding F4: memberlist.size.local
+// must report the bytes of the local push/pull state sent. It used to read
+// bytes 1-4 of the MessagePack encoding as a big-endian length.
+func TestSizeLocalGaugeIsMessageSize(t *testing.T) {
+	sink := newRecordingSink()
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Transport = (&MockNetwork{}).NewTransport("local")
+		c.Metrics = sink
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+	if err := m.setAlive(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w := net.Pipe()
+	received := make(chan int)
+	go func() {
+		b, _ := io.ReadAll(r)
+		received <- len(b)
+	}()
+	if err := m.sendLocalState(w, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	n := <-received
+	if got, _ := sink.gauge("memberlist.size.local"); int(got) != n {
+		t.Fatalf("memberlist.size.local = %v, want the %d bytes sent", got, n)
 	}
 }

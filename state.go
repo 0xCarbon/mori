@@ -387,20 +387,8 @@ func (m *Memberlist) probeNode(node *nodeState) {
 			}
 		}
 	} else {
-		var msgs [][]byte
-		if buf, err := encode(pingMsg, &ping, m.config.MsgpackUseNewTimeFormat); err != nil {
-			m.logger.Error("failed to encode UDP ping message", "error", err)
-			return
-		} else {
-			msgs = append(msgs, buf.Bytes())
-		}
 		s := suspect{Incarnation: node.Incarnation, Node: node.Name, From: m.config.Name}
-		if buf, err := encode(suspectMsg, &s, m.config.MsgpackUseNewTimeFormat); err != nil {
-			m.logger.Error("failed to encode suspect message", "error", err)
-			return
-		} else {
-			msgs = append(msgs, buf.Bytes())
-		}
+		msgs := [][]byte{encode(pingMsg, ping), encode(suspectMsg, s)}
 
 		compound := makeCompoundMessage(msgs)
 		if err := m.rawSendMsgPacket(node.FullAddress(), &node.Node, compound.Bytes()); err != nil {
@@ -761,7 +749,7 @@ func (m *Memberlist) verifyProtocol(remote []pushNodeState) error {
 		}
 
 		// If the node isn't alive, then skip it
-		if rn.State != StateAlive {
+		if NodeStateType(rn.State) != StateAlive {
 			continue
 		}
 
@@ -1389,7 +1377,7 @@ func (m *Memberlist) deadNodeLocked(d *dead, receipt *eventReceipt) {
 // state transfer
 func (m *Memberlist) mergeState(remote []pushNodeState) {
 	for _, r := range remote {
-		switch r.State {
+		switch NodeStateType(r.State) {
 		case StateAlive:
 			a := alive{
 				Incarnation: r.Incarnation,

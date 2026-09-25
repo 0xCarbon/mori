@@ -33,8 +33,8 @@ behavioral contract per release), then code comments.
 
 - The msgpack encoding of every message must stay byte-for-byte compatible
   with go-msgpack v2 `MsgpackHandle{}` output: structs as maps keyed by field
-  name in declaration order, legacy raw strings (no str8/bin), nil byte
-  slices as nil. Message type numbers are append-only.
+  name with entries sorted by name, legacy raw strings (no str8/bin), nil
+  byte slices as nil. Message type numbers are append-only.
 - Changes to encoding are proven against captured go-msgpack vectors, never
   against the new code itself.
 - Every length or count read from the network is bounded before it sizes an

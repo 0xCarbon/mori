@@ -2,6 +2,16 @@
 
 ### Improvements
 
+* Mori owns its wire codec (`internal/msgpack`, `internal/wire`) instead of
+  `github.com/hashicorp/go-msgpack/v2`. The encoding is byte-for-byte what
+  go-msgpack's default handle produces, proven by a differential oracle
+  (21.6 M randomized agreements across encoding, decoding and alternative
+  encodings) and 144 captured golden vectors
+  (`project/evidence/w5-wire`). Decoding never panics, checks every length
+  against the remaining input (packets) or grows buffers with the bytes
+  received (streams), bounds field sizes (1 MiB; 64 MiB for compressed
+  payloads) and container nesting, and allocates only for non-empty string
+  and byte fields; encoding appends into one buffer without reflection.
 * The broadcast queue (`TransmitLimitedQueue`) is an intrusive treap: the
   same ordering and results as before, with no allocation when an entry
   moves to its next transmit tier. It no longer depends on
@@ -47,6 +57,8 @@
   	metrics.MeasureSinceWithLabels(k, t, labels(l))
   }
   ```
+* **BREAKING:** `Config.MsgpackUseNewTimeFormat` is removed. No protocol
+  message carries a time value, so it never changed the encoding.
 * The TCP-first DNS lookup in `Join` queries A and AAAA records through
   `net.Resolver` over TCP instead of sending an ANY query with
   `github.com/miekg/dns`. Resolvers following RFC 8482 answer ANY with a
@@ -73,6 +85,10 @@
   re-insertion, which reset the id generator, so a later broadcast could
   reuse a pending entry's id and replace it in the ordered set. Ids now
   never rewind (except in `Reset`). Inherited from upstream.
+* The `memberlist.size.local` gauge reports the size of the local push/pull
+  message. It used to decode bytes 1–4 of the MessagePack encoding as a
+  big-endian length (111 bytes sent were reported as 2,208,582,100).
+  Inherited from upstream.
 * An alive message carrying a node's IPv4 address in 16-byte form (as
   advertised by nodes bound to `0.0.0.0`) no longer counts as an address
   change against the 4-byte form, which reported a spurious conflict and

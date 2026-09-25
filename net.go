@@ -15,7 +15,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/hashicorp/go-msgpack/v2/codec"
+	"github.com/0xCarbon/mori/internal/msgpack"
+	"github.com/0xCarbon/mori/internal/wire"
 )
 
 // This is the minimum and maximum protocol version that we can
@@ -106,116 +107,22 @@ const (
 	maxStreamMessageBytes = maxDecompressedBytes
 )
 
-// ping request sent directly to node
-type ping struct {
-	SeqNo uint32
-
-	// Node is sent so the target can verify they are
-	// the intended recipient. This is to protect again an agent
-	// restart with a new name.
-	Node string
-
-	SourceAddr []byte `codec:",omitempty"` // Source address, used for a direct reply
-	SourcePort uint16 `codec:",omitempty"` // Source port, used for a direct reply
-	SourceNode string `codec:",omitempty"` // Source name, used for a direct reply
-}
-
-// indirect ping sent to an indirect node
-type indirectPingReq struct {
-	SeqNo  uint32
-	Target []byte
-	Port   uint16
-
-	// Node is sent so the target can verify they are
-	// the intended recipient. This is to protect against an agent
-	// restart with a new name.
-	Node string
-
-	Nack bool // true if we'd like a nack back
-
-	SourceAddr []byte `codec:",omitempty"` // Source address, used for a direct reply
-	SourcePort uint16 `codec:",omitempty"` // Source port, used for a direct reply
-	SourceNode string `codec:",omitempty"` // Source name, used for a direct reply
-}
-
-// ack response is sent for a ping
-type ackResp struct {
-	SeqNo   uint32
-	Payload []byte
-}
-
-// nack response is sent for an indirect ping when the pinger doesn't hear from
-// the ping-ee within the configured timeout. This lets the original node know
-// that the indirect ping attempt happened but didn't succeed.
-type nackResp struct {
-	SeqNo uint32
-}
-
-// err response is sent to relay the error from the remote end
-type errResp struct {
-	Error string
-}
-
-// suspect is broadcast when we suspect a node is dead
-type suspect struct {
-	Incarnation uint32
-	Node        string
-	From        string // Include who is suspecting
-}
-
-// alive is broadcast when we know a node is alive.
-// Overloaded for nodes joining
-type alive struct {
-	Incarnation uint32
-	Node        string
-	Addr        []byte
-	Port        uint16
-	Meta        []byte
-
-	// The versions of the protocol/delegate that are being spoken, order:
-	// pmin, pmax, pcur, dmin, dmax, dcur
-	Vsn []uint8
-}
-
-// dead is broadcast when we confirm a node is dead
-// Overloaded for nodes leaving
-type dead struct {
-	Incarnation uint32
-	Node        string
-	From        string // Include who is suspecting
-}
-
-// pushPullHeader is used to inform the
-// otherside how many states we are transferring
-type pushPullHeader struct {
-	Nodes        int
-	UserStateLen int  // Encodes the byte lengh of user state
-	Join         bool // Is this a join request or a anti-entropy run
-}
-
-// userMsgHeader is used to encapsulate a userMsg
-type userMsgHeader struct {
-	UserMsgLen int // Encodes the byte lengh of user state
-}
-
-// pushNodeState is used for pushPullReq when we are
-// transferring out node states
-type pushNodeState struct {
-	Name        string
-	Addr        []byte
-	Port        uint16
-	Meta        []byte
-	Incarnation uint32
-	State       NodeStateType
-	Vsn         []uint8 // Protocol versions
-}
-
-// compress is used to wrap an underlying payload
-// using a specified compression algorithm
-type compress struct {
-	Algo compressionType
-	Buf  []byte
-}
+// The protocol messages and their codec live in internal/wire; these
+// aliases keep the protocol code readable.
+type (
+	ping            = wire.Ping
+	indirectPingReq = wire.IndirectPingReq
+	ackResp         = wire.AckResp
+	nackResp        = wire.NackResp
+	errResp         = wire.ErrResp
+	suspect         = wire.Suspect
+	alive           = wire.Alive
+	dead            = wire.Dead
+	pushPullHeader  = wire.PushPullHeader
+	userMsgHeader   = wire.UserMsgHeader
+	pushNodeState   = wire.PushNodeState
+	compress        = wire.Compress
+)
 
 // msgHandoff is used to transfer a message between goroutines
 type msgHandoff struct {
@@ -291,19 +198,13 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 		return
 	}
 
-	msgType, bufConn, dec, err := m.readStream(conn, streamLabel)
+	msgType, dec, err := m.readStream(conn, streamLabel)
 	if err != nil {
 		if err != io.EOF {
 			m.logger.Error("failed to receive", "error", err, connAttr(conn))
 
-			resp := errResp{err.Error()}
-			out, err := encode(errMsg, &resp, m.config.MsgpackUseNewTimeFormat)
-			if err != nil {
-				m.logger.Error("failed to encode error response", "error", err)
-				return
-			}
-
-			err = m.rawSendMsgStream(conn, out.Bytes(), streamLabel)
+			out := encode(errMsg, errResp{Error: err.Error()})
+			err = m.rawSendMsgStream(conn, out, streamLabel)
 			if err != nil {
 				m.logger.Error("failed to send error", "error", err, connAttr(conn))
 				return
@@ -314,7 +215,7 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 
 	switch msgType {
 	case userMsg:
-		if err := m.readUserMsg(bufConn, dec); err != nil {
+		if err := m.readUserMsg(dec); err != nil {
 			m.logger.Error("failed to receive user message", "error", err, connAttr(conn))
 		}
 	case pushPullMsg:
@@ -328,7 +229,7 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 			return
 		}
 
-		join, remoteNodes, userState, err := m.readRemoteState(bufConn, dec)
+		join, remoteNodes, userState, err := m.readRemoteState(dec)
 		if err != nil {
 			m.logger.Error("failed to read remote state", "error", err, connAttr(conn))
 			return
@@ -345,7 +246,7 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 		}
 	case pingMsg:
 		var p ping
-		if err := dec.Decode(&p); err != nil {
+		if err := p.DecodeMsgpack(dec); err != nil {
 			m.logger.Error("failed to decode ping", "error", err, connAttr(conn))
 			return
 		}
@@ -355,15 +256,8 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 			return
 		}
 
-		ack := ackResp{p.SeqNo, nil}
-		out, err := encode(ackRespMsg, &ack, m.config.MsgpackUseNewTimeFormat)
-		if err != nil {
-			m.logger.Error("failed to encode ack", "error", err)
-			return
-		}
-
-		err = m.rawSendMsgStream(conn, out.Bytes(), streamLabel)
-		if err != nil {
+		out := encode(ackRespMsg, ackResp{SeqNo: p.SeqNo})
+		if err := m.rawSendMsgStream(conn, out, streamLabel); err != nil {
 			m.logger.Error("failed to send ack", "error", err, connAttr(conn))
 			return
 		}
@@ -671,7 +565,7 @@ func (m *Memberlist) handleIndirectPing(buf []byte, from net.Addr) {
 		// Try to prevent the nack if we've caught it in time.
 		close(cancelCh)
 
-		ack := ackResp{ind.SeqNo, nil}
+		ack := ackResp{SeqNo: ind.SeqNo}
 		a := Address{
 			Addr: indAddr,
 			Name: ind.SourceNode,
@@ -699,7 +593,7 @@ func (m *Memberlist) handleIndirectPing(buf []byte, from net.Addr) {
 			case <-cancelCh:
 				return
 			case <-time.After(m.config.ProbeTimeout):
-				nack := nackResp{ind.SeqNo}
+				nack := nackResp{SeqNo: ind.SeqNo}
 				a := Address{
 					Addr: indAddr,
 					Name: ind.SourceNode,
@@ -821,15 +715,8 @@ func (m *Memberlist) handleCompressed(buf []byte, from net.Addr, timestamp time.
 }
 
 // encodeAndSendMsg is used to combine the encoding and sending steps
-func (m *Memberlist) encodeAndSendMsg(a Address, msgType messageType, msg any) error {
-	out, err := encode(msgType, msg, m.config.MsgpackUseNewTimeFormat)
-	if err != nil {
-		return err
-	}
-	if err := m.sendMsg(a, out.Bytes()); err != nil {
-		return err
-	}
-	return nil
+func (m *Memberlist) encodeAndSendMsg(a Address, msgType messageType, msg wire.Message) error {
+	return m.sendMsg(a, encode(msgType, msg))
 }
 
 // sendMsg is used to send a message via packet to another host. It will
@@ -870,14 +757,12 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 
 	// Check if we have compression enabled
 	if m.config.EnableCompression {
-		buf, err := compressPayload(msg, m.config.MsgpackUseNewTimeFormat)
+		buf, err := compressPayload(msg)
 		if err != nil {
 			m.logger.Warn("failed to compress payload", "error", err)
-		} else {
+		} else if len(buf) < len(msg) {
 			// Only use compression if it reduced the size
-			if buf.Len() < len(msg) {
-				msg = buf.Bytes()
-			}
+			msg = buf
 		}
 	}
 
@@ -933,11 +818,11 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel string) error {
 	// Check if compression is enabled
 	if m.config.EnableCompression {
-		compBuf, err := compressPayload(sendBuf, m.config.MsgpackUseNewTimeFormat)
+		compBuf, err := compressPayload(sendBuf)
 		if err != nil {
 			m.logger.Error("failed to compress payload", "error", err)
 		} else {
-			sendBuf = compBuf.Bytes()
+			sendBuf = compBuf
 		}
 	}
 
@@ -977,24 +862,11 @@ func (m *Memberlist) sendUserMsg(a Address, sendBuf []byte) error {
 		_ = conn.Close()
 	}()
 
-	bufConn := bytes.NewBuffer(nil)
-	if err := bufConn.WriteByte(byte(userMsg)); err != nil {
-		return err
-	}
-
-	header := userMsgHeader{UserMsgLen: len(sendBuf)}
-	hd := codec.MsgpackHandle{
-		TimeNotBuiltin: !m.config.MsgpackUseNewTimeFormat}
-
-	enc := codec.NewEncoder(bufConn, &hd)
-	if err := enc.Encode(&header); err != nil {
-		return err
-	}
-	if _, err := bufConn.Write(sendBuf); err != nil {
-		return err
-	}
-
-	return m.rawSendMsgStream(conn, bufConn.Bytes(), m.config.Label)
+	out := make([]byte, 0, 16+len(sendBuf))
+	out = append(out, byte(userMsg))
+	out = userMsgHeader{UserMsgLen: len(sendBuf)}.AppendMsgpack(out)
+	out = append(out, sendBuf...)
+	return m.rawSendMsgStream(conn, out, m.config.Label)
 }
 
 // sendAndReceiveState is used to initiate a push/pull over a stream with a
@@ -1023,14 +895,14 @@ func (m *Memberlist) sendAndReceiveState(a Address, join bool) ([]pushNodeState,
 	if err := conn.SetDeadline(time.Now().Add(m.config.TCPTimeout)); err != nil {
 		m.logger.Error("could not set the stream deadline", "error", err)
 	}
-	msgType, bufConn, dec, err := m.readStream(conn, m.config.Label)
+	msgType, dec, err := m.readStream(conn, m.config.Label)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	if msgType == errMsg {
 		var resp errResp
-		if err := dec.Decode(&resp); err != nil {
+		if err := resp.DecodeMsgpack(dec); err != nil {
 			return nil, nil, err
 		}
 		return nil, nil, fmt.Errorf("remote error: %v", resp.Error)
@@ -1043,7 +915,7 @@ func (m *Memberlist) sendAndReceiveState(a Address, join bool) ([]pushNodeState,
 	}
 
 	// Read remote state
-	_, remoteNodes, userState, err := m.readRemoteState(bufConn, dec)
+	_, remoteNodes, userState, err := m.readRemoteState(dec)
 	return remoteNodes, userState, err
 }
 
@@ -1062,7 +934,7 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 		localNodes[idx].Addr = n.Addr
 		localNodes[idx].Port = n.Port
 		localNodes[idx].Incarnation = n.Incarnation
-		localNodes[idx].State = n.State
+		localNodes[idx].State = int(n.State)
 		localNodes[idx].Meta = n.Meta
 		localNodes[idx].Vsn = []uint8{
 			n.PMin, n.PMax, n.PCur,
@@ -1085,40 +957,17 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 		m.runCallback(func() { userData = m.config.Delegate.LocalState(join) })
 	}
 
-	// Create a bytes buffer writer
-	bufConn := bytes.NewBuffer(nil)
-
-	// Send our node state
-	header := pushPullHeader{Nodes: len(localNodes), UserStateLen: len(userData), Join: join}
-	hd := codec.MsgpackHandle{}
-	enc := codec.NewEncoder(bufConn, &hd)
-
-	// Begin state push
-	if _, err := bufConn.Write([]byte{byte(pushPullMsg)}); err != nil {
-		return err
+	// Encode the message type, header, node states and user state.
+	out := make([]byte, 0, 64+64*len(localNodes)+len(userData))
+	out = append(out, byte(pushPullMsg))
+	out = pushPullHeader{Nodes: len(localNodes), UserStateLen: len(userData), Join: join}.AppendMsgpack(out)
+	for i := range localNodes {
+		out = localNodes[i].AppendMsgpack(out)
 	}
+	out = append(out, userData...)
 
-	if err := enc.Encode(&header); err != nil {
-		return err
-	}
-	for i := 0; i < header.Nodes; i++ {
-		if err := enc.Encode(&localNodes[i]); err != nil {
-			return err
-		}
-	}
-
-	// Write the user state as well
-	if userData != nil {
-		if _, err := bufConn.Write(userData); err != nil {
-			return err
-		}
-	}
-
-	moreBytes := binary.BigEndian.Uint32(bufConn.Bytes()[1:5])
-	m.metrics.gauge(keySizeLocal, float32(moreBytes))
-
-	// Get the send buffer
-	return m.rawSendMsgStream(conn, bufConn.Bytes(), streamLabel)
+	m.metrics.gauge(keySizeLocal, float32(len(out)))
+	return m.rawSendMsgStream(conn, out, streamLabel)
 }
 
 // encryptLocalState is used to help encrypt local state before sending
@@ -1196,83 +1045,76 @@ func (m *Memberlist) decryptRemoteState(bufConn io.Reader, streamLabel string) (
 }
 
 // readStream is used to read messages from a stream connection, decrypting and
-// decompressing the stream if necessary.
+// decompressing the stream if necessary. It returns the message type and a
+// decoder positioned at the message body.
 //
 // The provided streamLabel if present will be authenticated during decryption
 // of each message.
-func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType, io.Reader, *codec.Decoder, error) {
+func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType, *msgpack.Decoder, error) {
 	// Created a buffered reader. Every stream message is bounded: encrypted
 	// and compressed payloads carry their own limits, and this caps the
 	// plaintext form, whose size is otherwise only implied by the headers
 	// and the variable-length fields inside it.
-	var bufConn io.Reader = bufio.NewReader(io.LimitReader(conn, maxStreamMessageBytes))
+	bufConn := bufio.NewReader(io.LimitReader(conn, maxStreamMessageBytes))
 
 	// Read the message type
-	buf := [1]byte{0}
-	if _, err := io.ReadFull(bufConn, buf[:]); err != nil {
-		return 0, nil, nil, err
+	b, err := bufConn.ReadByte()
+	if err != nil {
+		return 0, nil, err
 	}
-	msgType := messageType(buf[0])
+	msgType := messageType(b)
+	dec := msgpack.NewStreamDecoder(bufConn)
 
 	// Check if the message is encrypted
 	if msgType == encryptMsg {
 		if !m.config.EncryptionEnabled() {
-			return 0, nil, nil,
+			return 0, nil,
 				fmt.Errorf("remote state is encrypted and encryption is not configured")
 		}
 
 		plain, err := m.decryptRemoteState(bufConn, streamLabel)
 		if err != nil {
-			return 0, nil, nil, err
+			return 0, nil, err
 		}
 		if len(plain) == 0 {
-			return 0, nil, nil, errors.New("decrypted message is empty")
+			return 0, nil, errors.New("decrypted message is empty")
 		}
 
-		// Reset message type and bufConn
+		// Reset message type and decoder
 		msgType = messageType(plain[0])
-		bufConn = bytes.NewReader(plain[1:])
+		dec = msgpack.NewDecoder(plain[1:])
 	} else if m.config.EncryptionEnabled() && m.config.GossipVerifyIncoming {
-		return 0, nil, nil,
+		return 0, nil,
 			fmt.Errorf("encryption is configured but remote state is not encrypted")
 	}
-
-	// Get the msgPack decoders
-	hd := codec.MsgpackHandle{}
-	dec := codec.NewDecoder(bufConn, &hd)
 
 	// Check if we have a compressed message
 	if msgType == compressMsg {
 		var c compress
-		if err := dec.Decode(&c); err != nil {
-			return 0, nil, nil, err
+		if err := c.DecodeMsgpack(dec); err != nil {
+			return 0, nil, err
 		}
 		decomp, err := decompressBuffer(&c, maxDecompressedBytes)
 		if err != nil {
-			return 0, nil, nil, err
+			return 0, nil, err
 		}
 		if len(decomp) == 0 {
-			return 0, nil, nil, errors.New("decompressed message is empty")
+			return 0, nil, errors.New("decompressed message is empty")
 		}
 
-		// Reset the message type
+		// Reset the message type and decoder
 		msgType = messageType(decomp[0])
-
-		// Create a new bufConn
-		bufConn = bytes.NewReader(decomp[1:])
-
-		// Create a new decoder
-		dec = codec.NewDecoder(bufConn, &hd)
+		dec = msgpack.NewDecoder(decomp[1:])
 	}
 
-	return msgType, bufConn, dec, nil
+	return msgType, dec, nil
 }
 
 // readRemoteState is used to read the remote state from a connection
-func (m *Memberlist) readRemoteState(bufConn io.Reader, dec *codec.Decoder) (bool, []pushNodeState, []byte, error) {
+func (m *Memberlist) readRemoteState(dec *msgpack.Decoder) (bool, []pushNodeState, []byte, error) {
 	// Read the push/pull header
 	var header pushPullHeader
-	if err := dec.Decode(&header); err != nil {
+	if err := header.DecodeMsgpack(dec); err != nil {
 		return false, nil, nil, err
 	}
 
@@ -1289,7 +1131,7 @@ func (m *Memberlist) readRemoteState(bufConn io.Reader, dec *codec.Decoder) (boo
 	remoteNodes := make([]pushNodeState, 0, min(header.Nodes, pushStatePrealloc))
 	for range header.Nodes {
 		var n pushNodeState
-		if err := dec.Decode(&n); err != nil {
+		if err := n.DecodeMsgpack(dec); err != nil {
 			return false, nil, nil, err
 		}
 		remoteNodes = append(remoteNodes, n)
@@ -1298,15 +1140,9 @@ func (m *Memberlist) readRemoteState(bufConn io.Reader, dec *codec.Decoder) (boo
 	// Read the remote user state into a buffer
 	var userBuf []byte
 	if header.UserStateLen > 0 {
-		userBuf = make([]byte, header.UserStateLen)
-		bytes, err := io.ReadAtLeast(bufConn, userBuf, header.UserStateLen)
-		if err == nil && bytes != header.UserStateLen {
-			err = fmt.Errorf(
-				"failed to read full user state (%d / %d)",
-				bytes, header.UserStateLen)
-		}
-		if err != nil {
-			return false, nil, nil, err
+		var err error
+		if userBuf, err = dec.ReadRaw(header.UserStateLen); err != nil {
+			return false, nil, nil, fmt.Errorf("failed to read full user state (%d bytes): %w", header.UserStateLen, err)
 		}
 	}
 
@@ -1340,7 +1176,7 @@ func (m *Memberlist) mergeRemoteState(join bool, remoteNodes []pushNodeState, us
 				Addr:  n.Addr,
 				Port:  n.Port,
 				Meta:  n.Meta,
-				State: n.State,
+				State: NodeStateType(n.State),
 			}
 			// verifyProtocol refused malformed vectors above.
 			vsn, _ := parseVsn(n.Vsn)
@@ -1382,37 +1218,28 @@ func (m *Memberlist) mergeRemoteState(join bool, remoteNodes []pushNodeState, us
 }
 
 // readUserMsg is used to decode a userMsg from a stream.
-func (m *Memberlist) readUserMsg(bufConn io.Reader, dec *codec.Decoder) error {
+func (m *Memberlist) readUserMsg(dec *msgpack.Decoder) error {
 	// Read the user message header
 	var header userMsgHeader
-	if err := dec.Decode(&header); err != nil {
+	if err := header.DecodeMsgpack(dec); err != nil {
 		return err
 	}
 
 	if header.UserMsgLen < 0 || header.UserMsgLen > maxUserMsgBytes {
 		return fmt.Errorf("user message length (%d) exceeds limit", header.UserMsgLen)
 	}
-
-	// Read the user message into a buffer
-	var userBuf []byte
-	if header.UserMsgLen > 0 {
-		userBuf = make([]byte, header.UserMsgLen)
-		bytes, err := io.ReadAtLeast(bufConn, userBuf, header.UserMsgLen)
-		if err == nil && bytes != header.UserMsgLen {
-			err = fmt.Errorf(
-				"failed to read full user message (%d / %d)",
-				bytes, header.UserMsgLen)
-		}
-		if err != nil {
-			return err
-		}
-
-		d := m.config.Delegate
-		if d != nil {
-			m.runCallback(func() { d.NotifyMsg(userBuf) })
-		}
+	if header.UserMsgLen == 0 {
+		return nil
 	}
 
+	// Read the user message into a buffer
+	userBuf, err := dec.ReadRaw(header.UserMsgLen)
+	if err != nil {
+		return fmt.Errorf("failed to read full user message (%d bytes): %w", header.UserMsgLen, err)
+	}
+	if d := m.config.Delegate; d != nil {
+		m.runCallback(func() { d.NotifyMsg(userBuf) })
+	}
 	return nil
 }
 
@@ -1438,16 +1265,11 @@ func (m *Memberlist) sendPingAndWaitForAck(a Address, ping ping, deadline time.T
 	}()
 	_ = conn.SetDeadline(deadline)
 
-	out, err := encode(pingMsg, &ping, m.config.MsgpackUseNewTimeFormat)
-	if err != nil {
+	if err = m.rawSendMsgStream(conn, encode(pingMsg, ping), m.config.Label); err != nil {
 		return false, err
 	}
 
-	if err = m.rawSendMsgStream(conn, out.Bytes(), m.config.Label); err != nil {
-		return false, err
-	}
-
-	msgType, _, dec, err := m.readStream(conn, m.config.Label)
+	msgType, dec, err := m.readStream(conn, m.config.Label)
 	if err != nil {
 		return false, err
 	}
@@ -1457,7 +1279,7 @@ func (m *Memberlist) sendPingAndWaitForAck(a Address, ping ping, deadline time.T
 	}
 
 	var ack ackResp
-	if err = dec.Decode(&ack); err != nil {
+	if err = ack.DecodeMsgpack(dec); err != nil {
 		return false, err
 	}
 

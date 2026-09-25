@@ -56,14 +56,14 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
 | W2 | Tooling: go 1.27.1, Makefile `ci`, `tools/checkdeps`, `tools/benchcmp`, CI workflow, AGENTS.md | done |
 | W3 | Small deps: go-multierror, sean-/seed, go-sockaddr, miekg/dns, google/btree | done |
 | W4 | Telemetry: `Config.Metrics` sink replaces go-metrics; `log/slog` replaces `log` | done |
-| W5 | Wire codec: `internal/msgpack` + `internal/wire`, golden vectors, differential evidence; drop go-msgpack | pending |
+| W5 | Wire codec: `internal/msgpack` + `internal/wire`, golden vectors, differential evidence; drop go-msgpack | done |
 | W6 | Tests: testify/goleak -> std; synctest for timer-driven tests; flake removal | pending |
 | W7 | Performance: UDP receive buffer reuse, encode/decode allocations, benchmarks + evidence | pending |
 | W8 | Fuzz targets, SECURITY.md threat model, README/CHANGELOG v0.8.0, independent review | pending |
 
 ## Decisions
 
-- **D1 (W5):** `internal/wire` owns message types and their codec so the
+- **D1 (W5, done):** `internal/wire` owns message types and their codec so the
   differential evidence module (path-nested under this module) can import
   it; `internal/msgpack` owns format primitives. Seam bought: the codec is
   testable and fuzzable without a Memberlist instance.
@@ -112,6 +112,13 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
   removed; ratchet 10 -> 7 (kr/text surfaced as a testify indirect).
   Tests log to t.Output() through a writer that goes quiet at cleanup.
 
+- 2026-09-25 W5: owned codec; go-msgpack removed (ratchet 7 -> 6, only
+  test deps left). Oracle caught that go-msgpack sorts struct keys by name
+  (160k/240k first-run mismatches); after the fix 21.6M randomized
+  agreements (evidence/w5-wire). Decoder: 0 panics over ~28M fuzz execs,
+  4 allocs per alive decode (one per variable field). F4 fixed. Deflaked
+  TestMemberlist_Join_IPv6 (responder merges after replying).
+
 ## Findings to fix (discovered during the waves)
 
 - F1 (W3): `nodeState.State` shadows the embedded `Node.State`, so the
@@ -122,3 +129,5 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
   ReplaceOrInsert then dropped a pending broadcast without Finished.
 - F3 (W3, fixed): IPv4 4- vs 16-byte forms compared bytewise produced
   spurious address conflicts.
+- F4 (W5, fixed): memberlist.size.local decoded msgpack header bytes as a
+  length (111 bytes reported as 2,208,582,100).

@@ -288,12 +288,6 @@ type Config struct {
 	// QueueCheckInterval is the interval at which we check the message
 	// queue to apply the warning and max depth.
 	QueueCheckInterval time.Duration
-
-	// MsgpackUseNewTimeFormat when set to true, force the underlying msgpack
-	// codec to use the new format of time.Time when encoding (used in
-	// go-msgpack v1.1.5 by default). Decoding is not affected, as all
-	// go-msgpack v2.1.0+ decoders know how to decode both formats.
-	MsgpackUseNewTimeFormat bool
 }
 
 // ParseCIDRs parses every entry of v. It returns the networks that parsed

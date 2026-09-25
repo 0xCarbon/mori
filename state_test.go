@@ -1217,7 +1217,7 @@ func TestMemberList_invokeAckHandler(t *testing.T) {
 	m.setAckHandler(0, f, 10*time.Millisecond)
 
 	// Should set b
-	m.invokeAckHandler(ackResp{0, nil}, time.Now())
+	m.invokeAckHandler(ackResp{SeqNo: 0}, time.Now())
 	if !b {
 		t.Fatalf("b not set")
 	}
@@ -1228,7 +1228,7 @@ func TestMemberList_invokeAckHandler(t *testing.T) {
 func TestMemberList_invokeAckHandler_Channel_Ack(t *testing.T) {
 	m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
 
-	ack := ackResp{0, []byte{0, 0, 0}}
+	ack := ackResp{SeqNo: 0, Payload: []byte{0, 0, 0}}
 
 	// Does nothing
 	m.invokeAckHandler(ack, time.Now())
@@ -1262,7 +1262,7 @@ func TestMemberList_invokeAckHandler_Channel_Ack(t *testing.T) {
 func TestMemberList_invokeAckHandler_Channel_Nack(t *testing.T) {
 	m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
 
-	nack := nackResp{0}
+	nack := nackResp{SeqNo: 0}
 
 	// Does nothing.
 	m.invokeNackHandler(nack)
@@ -1289,7 +1289,7 @@ func TestMemberList_invokeAckHandler_Channel_Nack(t *testing.T) {
 	// an ack up to the reap time, if we get one.
 	require.True(t, ackHandlerExists(t, m), "handler should not be reaped")
 
-	ack := ackResp{0, []byte{0, 0, 0}}
+	ack := ackResp{SeqNo: 0, Payload: []byte{0, 0, 0}}
 	m.invokeAckHandler(ack, time.Now())
 
 	select {
@@ -2213,25 +2213,25 @@ func TestMemberList_MergeState(t *testing.T) {
 			Name:        "test1",
 			Addr:        []byte{127, 0, 0, 1},
 			Incarnation: 2,
-			State:       StateAlive,
+			State:       int(StateAlive),
 		},
 		{
 			Name:        "test2",
 			Addr:        []byte{127, 0, 0, 2},
 			Incarnation: 1,
-			State:       StateSuspect,
+			State:       int(StateSuspect),
 		},
 		{
 			Name:        "test3",
 			Addr:        []byte{127, 0, 0, 3},
 			Incarnation: 1,
-			State:       StateDead,
+			State:       int(StateDead),
 		},
 		{
 			Name:        "test4",
 			Addr:        []byte{127, 0, 0, 4},
 			Incarnation: 2,
-			State:       StateAlive,
+			State:       int(StateAlive),
 		},
 	}
 
@@ -2694,7 +2694,7 @@ func TestMalformedVsnFromWire(t *testing.T) {
 		for _, state := range []NodeStateType{StateAlive, StateSuspect} {
 			t.Run(fmt.Sprintf("push-pull/%s/len%d", state.metricsString(), n), func(t *testing.T) {
 				m := newM(t)
-				remote := []pushNodeState{{Name: "peer", Addr: []byte{127, 0, 0, 2}, Port: 7946, State: state, Vsn: vsn}}
+				remote := []pushNodeState{{Name: "peer", Addr: []byte{127, 0, 0, 2}, Port: 7946, State: int(state), Vsn: vsn}}
 				var err error
 				noPanic(t, "mergeRemoteState", func() { err = m.mergeRemoteState(true, remote, nil) })
 				if err == nil {
