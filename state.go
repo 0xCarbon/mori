@@ -7,7 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"strings"
 	"sync"
@@ -87,12 +87,13 @@ func (n *Node) setVersions(vsn [vsnLen]uint8) {
 	n.DMin, n.DMax, n.DCur = vsn[3], vsn[4], vsn[5]
 }
 
-// NodeState is used to manage our state view of another node
+// nodeState is used to manage our state view of another node. The node's
+// current state is the embedded Node.State, so every Node copy handed to
+// users (Members, LocalNode, event callbacks) reports it.
 type nodeState struct {
 	Node
-	Incarnation uint32        // Last known incarnation number
-	State       NodeStateType // Current state
-	StateChange time.Time     // Time last state change happened
+	Incarnation uint32    // Last known incarnation number
+	StateChange time.Time // Time last state change happened
 }
 
 // Address returns the host:port form of a node's address, suitable for use
@@ -195,7 +196,7 @@ func (m *Memberlist) schedule() {
 // message is received until a stop tick arrives.
 func (m *Memberlist) triggerFunc(stagger time.Duration, C <-chan time.Time, stop <-chan struct{}, f func()) {
 	// Use a random stagger to avoid syncronizing
-	randStagger := time.Duration(uint64(rand.Int63()) % uint64(stagger))
+	randStagger := rand.N(stagger)
 	select {
 	case <-time.After(randStagger):
 	case <-stop:
@@ -219,7 +220,7 @@ func (m *Memberlist) pushPullTrigger(stop <-chan struct{}) {
 	interval := m.config.PushPullInterval
 
 	// Use a random stagger to avoid syncronizing
-	randStagger := time.Duration(uint64(rand.Int63()) % uint64(interval))
+	randStagger := rand.N(interval)
 	select {
 	case <-time.After(randStagger):
 	case <-stop:
@@ -1094,7 +1095,9 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 		m.numNodes.Add(1)
 	} else {
 		// Check if this address is different than the existing node unless the old node is dead.
-		if !bytes.Equal([]byte(state.Addr), a.Addr) || state.Port != a.Port {
+		// net.IP.Equal: the same IPv4 address may arrive in 4- or 16-byte
+		// form depending on how the peer obtained it.
+		if !state.Addr.Equal(a.Addr) || state.Port != a.Port {
 			errCon := m.config.IPAllowed(a.Addr)
 			if errCon != nil {
 				m.logger.Printf("[WARN] memberlist: Rejected IP update from %v to %v for node %s: %s", a.Node, state.Addr, net.IP(a.Addr), errCon)

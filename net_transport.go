@@ -14,7 +14,6 @@ import (
 	"time"
 
 	metrics "github.com/hashicorp/go-metrics/compat"
-	sockaddr "github.com/hashicorp/go-sockaddr"
 )
 
 const (
@@ -160,19 +159,15 @@ func (t *NetTransport) FinalAdvertiseAddr(ip string, port int) (net.IP, int, err
 		if t.config.BindAddrs[0] == "0.0.0.0" {
 			// Otherwise, if we're not bound to a specific IP, let's
 			// use a suitable private IP address.
-			var err error
-			ip, err = sockaddr.GetPrivateIP()
+			addr, err := privateAdvertiseAddr()
 			if err != nil {
-				return nil, 0, fmt.Errorf("failed to get interface addresses: %v", err)
+				return nil, 0, fmt.Errorf("failed to get interface addresses: %w", err)
 			}
-			if ip == "" {
-				return nil, 0, fmt.Errorf("no private IP address found, and explicit IP not provided")
-			}
-
-			advertiseAddr = net.ParseIP(ip)
-			if advertiseAddr == nil {
-				return nil, 0, fmt.Errorf("failed to parse advertise address: %q", ip)
-			}
+			// The 16-byte form (IPv4-mapped for IPv4) is what this path has
+			// always advertised; peers compare stored addresses bytewise, so
+			// keep it stable across upgrades.
+			a16 := addr.As16()
+			advertiseAddr = net.IP(a16[:])
 		} else {
 			// Use the IP that we're bound to, based on the first
 			// TCP listener, which we already ensure is there.

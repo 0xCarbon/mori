@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"runtime"
 	"slices"
@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-msgpack/v2/codec"
-	"github.com/sean-/seed"
 )
 
 // goid returns the current goroutine's id, parsed from the runtime stack
@@ -51,10 +50,6 @@ const (
 	lzwLitWidth = 8
 )
 
-func init() {
-	_, _ = seed.Init()
-}
-
 // Decode reverses the encode operation on a byte slice input
 func decode(buf []byte, out any) error {
 	r := bytes.NewReader(buf)
@@ -75,12 +70,13 @@ func encode(msgType messageType, in any, msgpackUseNewTimeFormat bool) (*bytes.B
 	return buf, err
 }
 
-// Returns a random offset between 0 and n
+// randomOffset returns a uniformly random offset in [0, n), or 0 when n is
+// not positive.
 func randomOffset(n int) int {
-	if n == 0 {
+	if n <= 0 {
 		return 0
 	}
-	return int(rand.Uint32() % uint32(n))
+	return rand.IntN(n)
 }
 
 // suspicionTimeout computes the timeout that should be used when

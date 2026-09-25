@@ -5,9 +5,8 @@ package mori
 
 import (
 	"math"
+	"math/rand/v2"
 	"sync"
-
-	"github.com/google/btree"
 )
 
 // TransmitLimitedQueue is used to queue messages to broadcast to
@@ -25,59 +24,171 @@ type TransmitLimitedQueue struct {
 	RetransmitMult int
 
 	mu    sync.Mutex
-	tq    *btree.BTree // stores *limitedBroadcast as btree.Item
+	root  *limitedBroadcast // treap ordered by less, heap-ordered by prio
+	n     int
 	tm    map[string]*limitedBroadcast
 	idGen int64
 }
 
+// limitedBroadcast is a queued broadcast and, intrusively, its node in the
+// queue's treap: re-queuing an entry at the next transmit tier relinks it
+// without allocating.
 type limitedBroadcast struct {
-	transmits int   // btree-key[0]: Number of transmissions attempted.
-	msgLen    int64 // btree-key[1]: copied from len(b.Message())
-	id        int64 // btree-key[2]: unique incrementing id stamped at submission time
+	transmits int   // key[0]: Number of transmissions attempted.
+	msgLen    int64 // key[1]: copied from len(b.Message())
+	id        int64 // key[2]: unique incrementing id stamped at submission time
 	b         Broadcast
 
 	name string // set if Broadcast is a NamedBroadcast
+
+	left, right *limitedBroadcast
+	prio        uint64
 }
 
-// Less tests whether the current item is less than the given argument.
+// less tests whether b orders before o. It is a strict total order over
+// queued entries (ids are unique), so the treap never holds equal keys.
 //
-// This must provide a strict weak ordering.
-// If !a.Less(b) && !b.Less(a), we treat this to mean a == b (i.e. we can only
-// hold one of either a or b in the tree).
-//
-// default ordering is
+// The ordering is
 // - [transmits=0, ..., transmits=inf]
 // - [transmits=0:len=999, ..., transmits=0:len=2, ...]
 // - [transmits=0:len=999,id=999, ..., transmits=0:len=999:id=1, ...]
-func (b *limitedBroadcast) Less(than btree.Item) bool {
-	o := than.(*limitedBroadcast)
-	if b.transmits < o.transmits {
-		return true
-	} else if b.transmits > o.transmits {
-		return false
+func (b *limitedBroadcast) less(o *limitedBroadcast) bool {
+	if b.transmits != o.transmits {
+		return b.transmits < o.transmits
 	}
-	if b.msgLen > o.msgLen {
-		return true
-	} else if b.msgLen < o.msgLen {
-		return false
+	if b.msgLen != o.msgLen {
+		return b.msgLen > o.msgLen
 	}
 	return b.id > o.id
 }
 
+// treapInsert links x into the treap rooted at t and returns the new root.
+// x must not be linked already.
+func treapInsert(t, x *limitedBroadcast) *limitedBroadcast {
+	if t == nil {
+		x.left, x.right = nil, nil
+		return x
+	}
+	if x.prio > t.prio {
+		x.left, x.right = treapSplit(t, x)
+		return x
+	}
+	if x.less(t) {
+		t.left = treapInsert(t.left, x)
+	} else {
+		t.right = treapInsert(t.right, x)
+	}
+	return t
+}
+
+// treapSplit partitions t into the entries ordering before k and the rest.
+func treapSplit(t, k *limitedBroadcast) (lo, hi *limitedBroadcast) {
+	if t == nil {
+		return nil, nil
+	}
+	if t.less(k) {
+		t.right, hi = treapSplit(t.right, k)
+		return t, hi
+	}
+	lo, t.left = treapSplit(t.left, k)
+	return lo, t
+}
+
+// treapMerge joins two treaps where every entry of lo orders before hi.
+func treapMerge(lo, hi *limitedBroadcast) *limitedBroadcast {
+	switch {
+	case lo == nil:
+		return hi
+	case hi == nil:
+		return lo
+	case lo.prio > hi.prio:
+		lo.right = treapMerge(lo.right, hi)
+		return lo
+	default:
+		hi.left = treapMerge(lo, hi.left)
+		return hi
+	}
+}
+
+// treapDelete unlinks x (which must be linked in t) and returns the new root.
+func treapDelete(t, x *limitedBroadcast) *limitedBroadcast {
+	if t == x {
+		r := treapMerge(t.left, t.right)
+		x.left, x.right = nil, nil
+		return r
+	}
+	if x.less(t) {
+		t.left = treapDelete(t.left, x)
+	} else {
+		t.right = treapDelete(t.right, x)
+	}
+	return t
+}
+
+// ascendFrom calls f for each entry not ordering before k, in ascending
+// order, until f returns false. A nil k visits every entry.
+func ascendFrom(t, k *limitedBroadcast, f func(*limitedBroadcast) bool) {
+	var stack []*limitedBroadcast
+	for t != nil || len(stack) > 0 {
+		for t != nil {
+			if k != nil && t.less(k) {
+				t = t.right // t and its left subtree order before k
+				continue
+			}
+			stack = append(stack, t)
+			t = t.left
+		}
+		if len(stack) == 0 {
+			return // every remaining entry orders before k
+		}
+		t = stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if !f(t) {
+			return
+		}
+		t = t.right
+		k = nil // everything after an included entry is included
+	}
+}
+
+// descend calls f for each entry in descending order until f returns false.
+func descend(t *limitedBroadcast, f func(*limitedBroadcast) bool) {
+	var stack []*limitedBroadcast
+	for t != nil || len(stack) > 0 {
+		for t != nil {
+			stack = append(stack, t)
+			t = t.right
+		}
+		t = stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if !f(t) {
+			return
+		}
+		t = t.left
+	}
+}
+
+func treapMin(t *limitedBroadcast) *limitedBroadcast {
+	for t != nil && t.left != nil {
+		t = t.left
+	}
+	return t
+}
+
+func treapMax(t *limitedBroadcast) *limitedBroadcast {
+	for t != nil && t.right != nil {
+		t = t.right
+	}
+	return t
+}
+
 // walkReadOnlyLocked calls f for each item in the queue traversing it in
-// natural order (by Less) when reverse=false and the opposite when true. You
+// natural order (by less) when reverse=false and the opposite when true. You
 // must hold the mutex.
 //
-// This method panics if you attempt to mutate the item during traversal.  The
-// underlying btree should also not be mutated during traversal.
+// This method panics if you attempt to mutate the item during traversal.
 func (q *TransmitLimitedQueue) walkReadOnlyLocked(reverse bool, f func(*limitedBroadcast) bool) {
-	if q.lenLocked() == 0 {
-		return
-	}
-
-	iter := func(item btree.Item) bool {
-		cur := item.(*limitedBroadcast)
-
+	iter := func(cur *limitedBroadcast) bool {
 		prevTransmits := cur.transmits
 		prevMsgLen := cur.msgLen
 		prevID := cur.id
@@ -87,14 +198,13 @@ func (q *TransmitLimitedQueue) walkReadOnlyLocked(reverse bool, f func(*limitedB
 		if prevTransmits != cur.transmits || prevMsgLen != cur.msgLen || prevID != cur.id {
 			panic("edited queue while walking read only")
 		}
-
 		return keepGoing
 	}
 
 	if reverse {
-		q.tq.Descend(iter) // end with transmit 0
+		descend(q.root, iter) // end with transmit 0
 	} else {
-		q.tq.Ascend(iter) // start with transmit 0
+		ascendFrom(q.root, nil, iter) // start with transmit 0
 	}
 }
 
@@ -157,9 +267,6 @@ func (q *TransmitLimitedQueue) QueueBroadcast(b Broadcast) {
 // lazyInit initializes internal data structures the first time they are
 // needed.  You must already hold the mutex.
 func (q *TransmitLimitedQueue) lazyInit() {
-	if q.tq == nil {
-		q.tq = btree.New(32)
-	}
 	if q.tm == nil {
 		q.tm = make(map[string]*limitedBroadcast)
 	}
@@ -174,12 +281,11 @@ func (q *TransmitLimitedQueue) queueBroadcast(b Broadcast, initialTransmits int)
 
 	q.lazyInit()
 
-	if q.idGen == math.MaxInt64 {
-		// it's super duper unlikely to wrap around within the retransmit limit
-		q.idGen = 1
-	} else {
-		q.idGen++
-	}
+	// Ids are unique for the queue's lifetime (only Reset rewinds them):
+	// the ordering relies on them to break ties, and an entry pending
+	// re-insertion inside GetBroadcasts still holds its id while the queue
+	// looks empty. 2^63 submissions cannot be exhausted.
+	q.idGen++
 	id := q.idGen
 
 	lb := &limitedBroadcast{
@@ -204,9 +310,7 @@ func (q *TransmitLimitedQueue) queueBroadcast(b Broadcast, initialTransmits int)
 	} else if !unique {
 		// Slow path, hopefully nothing hot hits this.
 		var remove []*limitedBroadcast
-		q.tq.Ascend(func(item btree.Item) bool {
-			cur := item.(*limitedBroadcast)
-
+		ascendFrom(q.root, nil, func(cur *limitedBroadcast) bool {
 			// Special Broadcasts can only invalidate each other.
 			switch cur.b.(type) {
 			case NamedBroadcast:
@@ -233,22 +337,19 @@ func (q *TransmitLimitedQueue) queueBroadcast(b Broadcast, initialTransmits int)
 // deleteItem removes the given item from the overall datastructure. You
 // must already hold the mutex.
 func (q *TransmitLimitedQueue) deleteItem(cur *limitedBroadcast) {
-	_ = q.tq.Delete(cur)
+	q.root = treapDelete(q.root, cur)
+	q.n--
 	if cur.name != "" {
 		delete(q.tm, cur.name)
-	}
-
-	if q.tq.Len() == 0 {
-		// At idle there's no reason to let the id generator keep going
-		// indefinitely.
-		q.idGen = 0
 	}
 }
 
 // addItem adds the given item into the overall datastructure. You must already
 // hold the mutex.
 func (q *TransmitLimitedQueue) addItem(cur *limitedBroadcast) {
-	_ = q.tq.ReplaceOrInsert(cur)
+	cur.prio = rand.Uint64()
+	q.root = treapInsert(q.root, cur)
+	q.n++
 	if cur.name != "" {
 		q.tm[cur.name] = cur
 	}
@@ -261,15 +362,7 @@ func (q *TransmitLimitedQueue) getTransmitRange() (minTransmit, maxTransmit int)
 	if q.lenLocked() == 0 {
 		return 0, 0
 	}
-	minItem, maxItem := q.tq.Min(), q.tq.Max()
-	if minItem == nil || maxItem == nil {
-		return 0, 0
-	}
-
-	min := minItem.(*limitedBroadcast).transmits
-	max := maxItem.(*limitedBroadcast).transmits
-
-	return min, max
+	return treapMin(q.root).transmits, treapMax(q.root).transmits
 }
 
 // GetBroadcasts is used to get a number of broadcasts, up to a byte limit
@@ -303,19 +396,16 @@ func (q *TransmitLimitedQueue) GetBroadcasts(overhead, limit int) [][]byte {
 		// Search for the least element on a given tier (by transmit count) as
 		// defined in the limitedBroadcast.Less function that will fit into our
 		// remaining space.
-		greaterOrEqual := &limitedBroadcast{
+		greaterOrEqual := limitedBroadcast{
 			transmits: transmits,
 			msgLen:    free,
 			id:        math.MaxInt64,
 		}
-		lessThan := &limitedBroadcast{
-			transmits: transmits + 1,
-			msgLen:    math.MaxInt64,
-			id:        math.MaxInt64,
-		}
 		var keep *limitedBroadcast
-		q.tq.AscendRange(greaterOrEqual, lessThan, func(item btree.Item) bool {
-			cur := item.(*limitedBroadcast)
+		ascendFrom(q.root, &greaterOrEqual, func(cur *limitedBroadcast) bool {
+			if cur.transmits != transmits {
+				return false // past this tier
+			}
 			// Check if this is within our limits
 			if int64(len(cur.b.Message())) > free {
 				// If this happens it's a bug in the datastructure or
@@ -371,10 +461,7 @@ func (q *TransmitLimitedQueue) NumQueued() int {
 // lenLocked returns the length of the overall queue datastructure. You must
 // hold the mutex.
 func (q *TransmitLimitedQueue) lenLocked() int {
-	if q.tq == nil {
-		return 0
-	}
-	return q.tq.Len()
+	return q.n
 }
 
 // Reset clears all the queued messages. Should only be used for tests.
@@ -387,7 +474,8 @@ func (q *TransmitLimitedQueue) Reset() {
 		return true
 	})
 
-	q.tq = nil
+	q.root = nil
+	q.n = 0
 	q.tm = nil
 	q.idGen = 0
 }
@@ -399,12 +487,8 @@ func (q *TransmitLimitedQueue) Prune(maxRetain int) {
 	defer q.mu.Unlock()
 
 	// Do nothing if queue size is less than the limit
-	for q.tq.Len() > maxRetain {
-		item := q.tq.Max()
-		if item == nil {
-			break
-		}
-		cur := item.(*limitedBroadcast)
+	for q.n > maxRetain {
+		cur := treapMax(q.root)
 		cur.b.Finished()
 		q.deleteItem(cur)
 	}

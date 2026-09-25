@@ -1,0 +1,4 @@
+    state_test.go:2784: incarnation 1 after an alive with the 16-byte form of the same address, want 2
+FAIL
+FAIL	github.com/0xCarbon/mori	0.003s
+FAIL

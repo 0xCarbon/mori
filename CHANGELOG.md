@@ -2,9 +2,47 @@
 
 ### Improvements
 
+* The broadcast queue (`TransmitLimitedQueue`) is an intrusive treap: the
+  same ordering and results as before, with no allocation when an entry
+  moves to its next transmit tier. It no longer depends on
+  `github.com/google/btree`.
+* Private advertise-address discovery (bind to `0.0.0.0`) uses `net/netip`
+  and the RFC 6890 special-purpose table directly; the default-route
+  interface is found with a UDP "connect" probe, so no routing-table parsing
+  or `github.com/hashicorp/go-sockaddr` is needed.
+
 ### Changes
 
+* The TCP-first DNS lookup in `Join` queries A and AAAA records through
+  `net.Resolver` over TCP instead of sending an ANY query with
+  `github.com/miekg/dns`. Resolvers following RFC 8482 answer ANY with a
+  single synthesized HINFO record, which made the TCP-first lookup silently
+  return nothing and fall back to the system resolver.
+* `ParseCIDRs` and `Join` combine multiple errors with `errors.Join` (one
+  line per error) instead of `go-multierror`; `Join` wraps each cause with
+  `%w`.
+* The public-address warning and advertise-address selection treat only
+  RFC 6890's `2001::/23` and `2001:db8::/32` as special-purpose within
+  `2001::/16`; go-sockaddr's table covered the whole `/16`, including
+  global unicast such as `2001:4860::/32`.
+* Randomness uses `math/rand/v2` (`github.com/sean-/seed` is gone; the
+  global generator has been seeded automatically since Go 1.20).
+
 ### Fixed
+
+* `Node.State` now reports the node's actual state everywhere a `Node` is
+  handed out (`Members`, `LocalNode`, `EventDelegate`/`ConflictDelegate`
+  callbacks). Internal state shadowed the field, so every such `Node`
+  reported `StateAlive`, even in `NotifyLeave`. Inherited from upstream.
+* A broadcast could be silently dropped without `Finished` being called:
+  `GetBroadcasts` briefly empties the queue while sent entries await
+  re-insertion, which reset the id generator, so a later broadcast could
+  reuse a pending entry's id and replace it in the ordered set. Ids now
+  never rewind (except in `Reset`). Inherited from upstream.
+* An alive message carrying a node's IPv4 address in 16-byte form (as
+  advertised by nodes bound to `0.0.0.0`) no longer counts as an address
+  change against the 4-byte form, which reported a spurious conflict and
+  refused the update.
 
 * `(*Memberlist).Members` and `(*Memberlist).LocalNode` now return snapshot
   copies of `Node` taken under the node lock, instead of pointers into

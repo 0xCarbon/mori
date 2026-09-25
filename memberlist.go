@@ -34,9 +34,6 @@ import (
 	"time"
 
 	metrics "github.com/hashicorp/go-metrics/compat"
-	"github.com/hashicorp/go-multierror"
-	"github.com/hashicorp/go-sockaddr"
-	"github.com/miekg/dns"
 )
 
 var errNodeNamesAreRequired = errors.New("memberlist: node names are required by configuration but one was not provided")
@@ -377,12 +374,12 @@ func Create(conf *Config) (*Memberlist, error) {
 // join the cluster.
 func (m *Memberlist) Join(existing []string) (int, error) {
 	numSuccess := 0
-	var errs error
+	var errs []error
 	for _, exist := range existing {
 		addrs, err := m.resolveAddr(exist)
 		if err != nil {
-			err = fmt.Errorf("failed to resolve %s: %v", exist, err)
-			errs = multierror.Append(errs, err)
+			err = fmt.Errorf("failed to resolve %s: %w", exist, err)
+			errs = append(errs, err)
 			m.logger.Printf("[WARN] memberlist: %v", err)
 			continue
 		}
@@ -391,19 +388,18 @@ func (m *Memberlist) Join(existing []string) (int, error) {
 			hp := joinHostPort(addr.ip.String(), addr.port)
 			a := Address{Addr: hp, Name: addr.nodeName}
 			if err := m.pushPullNode(a, true); err != nil {
-				err = fmt.Errorf("failed to join %s: %v", a.Addr, err)
-				errs = multierror.Append(errs, err)
+				err = fmt.Errorf("failed to join %s: %w", a.Addr, err)
+				errs = append(errs, err)
 				m.logger.Printf("[DEBUG] memberlist: %v", err)
 				continue
 			}
 			numSuccess++
 		}
-
 	}
 	if numSuccess > 0 {
-		errs = nil
+		return numSuccess, nil
 	}
-	return numSuccess, errs
+	return 0, errors.Join(errs...)
 }
 
 // ipPort holds information about a node we want to try to join.
@@ -419,6 +415,11 @@ type ipPort struct {
 // Consul's. By doing the TCP lookup directly, we get the best chance for the
 // largest list of hosts to join. Since joins are relatively rare events, it's ok
 // to do this rather expensive operation.
+//
+// The lookup asks for A and AAAA records through the first nameserver of
+// Config.DNSConfigPath. It deliberately does not use an ANY query: resolvers
+// following RFC 8482 answer ANY with a single synthesized HINFO record, which
+// would make this lookup silently empty.
 func (m *Memberlist) tcpLookupIP(host string, defaultPort uint16, nodeName string) ([]ipPort, error) {
 	// Don't attempt any TCP lookups against non-fully qualified domain
 	// names, since those will likely come from the resolv.conf file.
@@ -427,51 +428,66 @@ func (m *Memberlist) tcpLookupIP(host string, defaultPort uint16, nodeName strin
 	}
 
 	// Make sure the domain name is terminated with a dot (we know there's
-	// at least one character at this point).
+	// at least one character at this point), so no search domain applies.
 	dn := host
 	if dn[len(dn)-1] != '.' {
 		dn = dn + "."
 	}
 
 	// See if we can find a server to try.
-	cc, err := dns.ClientConfigFromFile(m.config.DNSConfigPath)
+	servers, err := readNameservers(m.config.DNSConfigPath)
 	if err != nil {
 		return nil, err
 	}
-	if len(cc.Servers) > 0 {
-		// We support host:port in the DNS config, but need to add the
-		// default port if one is not supplied.
-		server := cc.Servers[0]
-		if !hasPort(server) {
-			server = net.JoinHostPort(server, cc.Port)
-		}
+	if len(servers) == 0 {
+		return nil, nil
+	}
+	server := servers[0]
 
-		// Do the lookup.
-		c := new(dns.Client)
-		c.Net = "tcp"
-		msg := new(dns.Msg)
-		msg.SetQuestion(dn, dns.TypeANY)
-		in, _, err := c.Exchange(msg, server)
-		if err != nil {
-			return nil, err
-		}
-
-		// Handle any IPs we get back that we can attempt to join.
-		var ips []ipPort
-		for _, r := range in.Answer {
-			switch rr := r.(type) {
-			case (*dns.A):
-				ips = append(ips, ipPort{ip: rr.A, port: defaultPort, nodeName: nodeName})
-			case (*dns.AAAA):
-				ips = append(ips, ipPort{ip: rr.AAAA, port: defaultPort, nodeName: nodeName})
-			case (*dns.CNAME):
-				m.logger.Printf("[DEBUG] memberlist: Ignoring CNAME RR in TCP-first answer for '%s'", host)
-			}
-		}
-		return ips, nil
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", server)
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), m.config.TCPTimeout)
+	defer cancel()
+	addrs, err := resolver.LookupNetIP(ctx, "ip", dn)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, nil
+	ips := make([]ipPort, 0, len(addrs))
+	for _, addr := range addrs {
+		ips = append(ips, ipPort{ip: net.IP(addr.Unmap().AsSlice()), port: defaultPort, nodeName: nodeName})
+	}
+	return ips, nil
+}
+
+// readNameservers returns the nameserver addresses (host:port) listed in a
+// resolv.conf-format file, in order. Entries without a port use 53.
+func readNameservers(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var servers []string
+	for line := range strings.Lines(string(data)) {
+		if i := strings.IndexAny(line, "#;"); i >= 0 {
+			line = line[:i]
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "nameserver" {
+			continue
+		}
+		server := fields[1]
+		if !hasPort(server) {
+			server = net.JoinHostPort(strings.Trim(server, "[]"), "53")
+		}
+		servers = append(servers, server)
+	}
+	return servers, nil
 }
 
 // resolveAddr is used to resolve the address into an address,
@@ -545,18 +561,7 @@ func (m *Memberlist) setAlive(receipt *eventReceipt) error {
 	}
 
 	// Check if this is a public address without encryption
-	ipAddr, err := sockaddr.NewIPAddr(addr.String())
-	if err != nil {
-		return fmt.Errorf("failed to parse interface addresses: %v", err)
-	}
-	ifAddrs := []sockaddr.IfAddr{
-		{
-			SockAddr: ipAddr,
-		},
-	}
-	_, publicIfs, _ := sockaddr.IfByRFC("6890", ifAddrs)
-
-	if len(publicIfs) > 0 && !m.config.EncryptionEnabled() {
+	if isPublicAddress(addr) && !m.config.EncryptionEnabled() {
 		m.logger.Printf("[WARN] memberlist: Binding to public address without encryption!")
 	}
 

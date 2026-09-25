@@ -54,7 +54,7 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
 | W0 | Goal doc, branch, baseline measurements | done |
 | W1 | Upstream security fixes (#361 #363 #368 #369) + local hardening of the same classes | done |
 | W2 | Tooling: go 1.27.1, Makefile `ci`, `tools/checkdeps`, `tools/benchcmp`, CI workflow, AGENTS.md | done |
-| W3 | Small deps: go-multierror, sean-/seed, go-sockaddr, miekg/dns, google/btree | pending |
+| W3 | Small deps: go-multierror, sean-/seed, go-sockaddr, miekg/dns, google/btree | done |
 | W4 | Telemetry: `Config.Metrics` sink replaces go-metrics; `log/slog` replaces `log` | pending |
 | W5 | Wire codec: `internal/msgpack` + `internal/wire`, golden vectors, differential evidence; drop go-msgpack | pending |
 | W6 | Tests: testify/goleak -> std; synctest for timer-driven tests; flake removal | pending |
@@ -96,9 +96,23 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
   modernizers applied after review. Fixed a 32-bit test overflow found by
   the new 386 cross vet.
 
+- 2026-09-25 W3: removed go-multierror, errwrap, seed, go-sockaddr,
+  miekg/dns (+5 golang.org/x indirects), google/btree; ratchet 21 -> 10.
+  RED receipts in project/evidence/w3/: F1 node state, duplicate queue id
+  (message dropped without Finished), RFC 8482 ANY lookup, IPv4 4/16-byte
+  address conflict. Treap pinned to a sorted-slice oracle (caught an
+  empty-stack seek bug before commit). Advertise-address discovery matched
+  go-sockaddr on this host (evidence/w3/sockaddr-differential.txt).
+  Deflaked TestMemberlist_Join_Cancel and the queue-metrics test (race
+  timing), both pre-existing.
+
 ## Findings to fix (discovered during the waves)
 
 - F1 (W3): `nodeState.State` shadows the embedded `Node.State`, so the
   `Node` values handed to users (`Members`, `LocalNode`, event callbacks)
   always report `StateAlive`, even in `NotifyLeave`. Inherited from
-  upstream. Fix: single `State` field on `Node`.
+  upstream. Fixed in W3.
+- F2 (W3, fixed): queue id generator rewound mid-GetBroadcasts; btree
+  ReplaceOrInsert then dropped a pending broadcast without Finished.
+- F3 (W3, fixed): IPv4 4- vs 16-byte forms compared bytewise produced
+  spurious address conflicts.

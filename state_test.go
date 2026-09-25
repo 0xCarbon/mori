@@ -2762,3 +2762,65 @@ func TestMalformedVsnFromWire(t *testing.T) {
 type acceptMerge struct{}
 
 func (acceptMerge) NotifyMerge([]*Node) error { return nil }
+
+// TestNodeStateVisibleToUsers covers finding F1: the Node values handed to
+// users must carry the node's current state. nodeState used to declare its
+// own State field, shadowing Node.State, so every Node copy reported
+// StateAlive — including the one passed to NotifyLeave.
+func TestNodeStateVisibleToUsers(t *testing.T) {
+	events := make(chan NodeEvent, 16)
+	m := GetMemberlist(t, func(c *Config) {
+		c.Transport = (&MockNetwork{}).NewTransport("local")
+		c.Events = &ChannelEventDelegate{Ch: events}
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	vsn := []uint8{1, 5, 2, 0, 0, 0}
+	m.aliveNode(&alive{Incarnation: 1, Node: "suspect", Addr: []byte{127, 0, 0, 2}, Port: 7946, Vsn: vsn}, false)
+	m.aliveNode(&alive{Incarnation: 1, Node: "dead", Addr: []byte{127, 0, 0, 3}, Port: 7946, Vsn: vsn}, false)
+	m.suspectNode(&suspect{Incarnation: 1, Node: "suspect", From: "someone"})
+	m.deadNode(&dead{Incarnation: 1, Node: "dead", From: "someone"})
+
+	for _, n := range m.Members() {
+		if n.Name == "suspect" && n.State != StateSuspect {
+			t.Fatalf("Members() reports %q as state %d, want StateSuspect", n.Name, n.State)
+		}
+	}
+
+	var leave *Node
+	for leave == nil {
+		select {
+		case ev := <-events:
+			if ev.Event == NodeLeave {
+				leave = ev.Node
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("no NotifyLeave delivered")
+		}
+	}
+	if leave.Name != "dead" || leave.State != StateDead {
+		t.Fatalf("NotifyLeave got %q in state %d, want %q in StateDead", leave.Name, leave.State, "dead")
+	}
+}
+
+// TestAliveAddressComparisonIgnoresIPForm: the same IPv4 address can arrive
+// as 4 bytes or as its 16-byte IPv4-mapped form (a node bound to 0.0.0.0
+// advertises the 16-byte form). Treating the two as different addresses
+// reported a conflict and refused the node's own refutation.
+func TestAliveAddressComparisonIgnoresIPForm(t *testing.T) {
+	m := GetMemberlist(t, func(c *Config) {
+		c.Transport = (&MockNetwork{}).NewTransport("local")
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	vsn := []uint8{1, 5, 2, 0, 0, 0}
+	m.aliveNode(&alive{Incarnation: 1, Node: "peer", Addr: []byte{10, 0, 0, 7}, Port: 7946, Vsn: vsn}, false)
+	m.aliveNode(&alive{Incarnation: 2, Node: "peer", Addr: net.ParseIP("10.0.0.7"), Port: 7946, Vsn: vsn}, false)
+
+	m.nodeLock.RLock()
+	inc := m.nodeMap["peer"].Incarnation
+	m.nodeLock.RUnlock()
+	if inc != 2 {
+		t.Fatalf("incarnation %d after an alive with the 16-byte form of the same address, want 2", inc)
+	}
+}

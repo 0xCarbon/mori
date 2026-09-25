@@ -5,21 +5,23 @@ package mori
 
 import (
 	"bytes"
-	"errors"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	iretry "github.com/0xCarbon/mori/internal/retry"
-	"github.com/miekg/dns"
 	"github.com/stretchr/testify/require"
 )
 
@@ -265,10 +267,20 @@ func TestCreate_checkBroadcastQueueMetrics(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(3 * time.Second)
-
+	// The first sample lands one QueueCheckInterval after Create.
 	sampleName := "consul.usage.test.memberlist.queue.broadcasts"
-	verifySampleExists(t, sampleName, sink)
+	iretry.Run(t, func(r *iretry.R) {
+		intervals := sink.Data()
+		if len(intervals) != 1 {
+			r.Fatalf("%d metric intervals, want 1", len(intervals))
+		}
+		intervals[0].RLock()
+		_, ok := intervals[0].Samples[sampleName]
+		intervals[0].RUnlock()
+		if !ok {
+			r.Fatalf("%s sample not emitted", sampleName)
+		}
+	})
 }
 
 func TestCreate_keyringOnly(t *testing.T) {
@@ -529,142 +541,16 @@ func TestMemberList_ResolveAddr(t *testing.T) {
 	}
 }
 
-type dnsHandler struct {
-	t *testing.T
-}
-
-func (h dnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	if len(r.Question) != 1 {
-		h.t.Fatalf("bad: %#v", r.Question)
-	}
-
-	name := "join.service.consul."
-	question := r.Question[0]
-	if question.Name != name || question.Qtype != dns.TypeANY {
-		h.t.Fatalf("bad: %#v", question)
-	}
-
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.Authoritative = true
-	m.RecursionAvailable = false
-	m.Answer = append(m.Answer, &dns.A{
-		Hdr: dns.RR_Header{
-			Name:   name,
-			Rrtype: dns.TypeA,
-			Class:  dns.ClassINET},
-		A: net.ParseIP("127.0.0.1"),
-	})
-	m.Answer = append(m.Answer, &dns.AAAA{
-		Hdr: dns.RR_Header{
-			Name:   name,
-			Rrtype: dns.TypeAAAA,
-			Class:  dns.ClassINET},
-		AAAA: net.ParseIP("2001:db8:a0b:12f0::1"),
-	})
-	if err := w.WriteMsg(m); err != nil {
-		h.t.Fatalf("err: %v", err)
-	}
-}
-
-func TestMemberList_ResolveAddr_TCP_First(t *testing.T) {
-	// Use unique IP address and dynamic port allocation
-	bindIP := getBindAddr()
-	bind := net.JoinHostPort(bindIP.String(), "0")
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	server := &dns.Server{
-		Addr:              bind,
-		Handler:           dnsHandler{t},
-		Net:               "tcp",
-		NotifyStartedFunc: wg.Done,
-	}
-	defer func() {
-		if err := server.Shutdown(); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-	}()
-
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
-			t.Errorf("err: %v", err)
-		}
-	}()
-	wg.Wait()
-
-	// Get the actual bind address after server starts
-	actualBind := server.Listener.Addr().String()
-
-	tmpFile, err := os.CreateTemp("", "")
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	defer func() {
-		if err := os.Remove(tmpFile.Name()); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-	}()
-
-	content := fmt.Appendf(nil, "nameserver %s", actualBind)
-	if _, err := tmpFile.Write(content); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	m := GetMemberlist(t, func(c *Config) {
-		c.DNSConfigPath = tmpFile.Name()
-	})
-	defer func() {
-		// LIFO: this runs after the deferred Shutdown below, and setAlive
-		// on a shut-down instance returns ErrShutdown by design.
-		if err := m.setAlive(nil); err != nil && !errors.Is(err, ErrShutdown) {
-			t.Fatal(err)
-		}
-	}()
-	m.schedule()
-	defer func() {
-		if err := m.Shutdown(); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	// Try with and without the trailing dot.
-	hosts := []string{
-		"join.service.consul.",
-		"join.service.consul",
-	}
-	for _, host := range hosts {
-		ips, err := m.resolveAddr(host)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		port := uint16(m.config.BindPort)
-		expected := []ipPort{
-			// Go now parses IPs like this and returns IP4-mapped IPv6 address.
-			// Confusingly if you print it you see the same as the input since
-			// IP.String converts IP4-mapped addresses back to dotted decimal notation
-			// but the underlying IP bytes don't compare as equal to the actual IPv4
-			// bytes the resolver will get from DNS.
-			{ip: net.ParseIP("127.0.0.1").To4(), port: port, nodeName: ""},
-			{ip: net.ParseIP("2001:db8:a0b:12f0::1"), port: port, nodeName: ""},
-		}
-		require.Equal(t, expected, ips)
-	}
-}
-
 func TestMemberList_Members(t *testing.T) {
-	n1 := &Node{Name: "test"}
-	n2 := &Node{Name: "test2"}
-	n3 := &Node{Name: "test3"}
+	n1 := &Node{Name: "test", State: StateAlive}
+	n2 := &Node{Name: "test2", State: StateDead}
+	n3 := &Node{Name: "test3", State: StateSuspect}
 
 	m := &Memberlist{}
 	nodes := []*nodeState{
-		{Node: *n1, State: StateAlive},
-		{Node: *n2, State: StateDead},
-		{Node: *n3, State: StateSuspect},
+		{Node: *n1},
+		{Node: *n2},
+		{Node: *n3},
 	}
 	m.nodes = nodes
 
@@ -949,13 +835,13 @@ func TestMemberlist_JoinDifferentNetworksMultiMasks(t *testing.T) {
 }
 
 type CustomMergeDelegate struct {
-	invoked bool
+	invoked atomic.Bool
 	t       *testing.T
 }
 
 func (c *CustomMergeDelegate) NotifyMerge(nodes []*Node) error {
 	c.t.Logf("Cancel merge")
-	c.invoked = true
+	c.invoked.Store(true)
 	return fmt.Errorf("Custom merge canceled")
 }
 
@@ -1004,13 +890,17 @@ func TestMemberlist_Join_Cancel(t *testing.T) {
 		t.Fatalf("should have 1 nodes! %v", m1.Members())
 	}
 
-	// Check delegate invocation
-	if !merge1.invoked {
+	// Check delegate invocation. m2's merge ran inside Join; m1 merges
+	// after sending its reply, so its delegate may still be running when
+	// Join returns.
+	if !merge2.invoked.Load() {
 		t.Fatalf("should invoke delegate")
 	}
-	if !merge2.invoked {
-		t.Fatalf("should invoke delegate")
-	}
+	iretry.Run(t, func(r *iretry.R) {
+		if !merge1.invoked.Load() {
+			r.Fatalf("should invoke delegate")
+		}
+	})
 }
 
 type CustomAliveDelegate struct {
@@ -2485,4 +2375,169 @@ func TestMemberlist_Members_SnapshotNoRace(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+// DNS record types used by the test server.
+const (
+	dnsTypeA     uint16 = 1
+	dnsTypeHINFO uint16 = 13
+	dnsTypeAAAA  uint16 = 28
+	dnsTypeANY   uint16 = 255
+)
+
+// serveTestDNS runs a minimal DNS-over-TCP server (RFC 1035 §4.2.2 framing)
+// that answers queries for name with the records in answers, keyed by query
+// type, and returns its address. Unknown names get NXDOMAIN. It is written
+// from the RFC with the standard library only, so the test does not share
+// code with the resolver under test.
+func serveTestDNS(t *testing.T, name string, answers map[uint16][][]byte) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", net.JoinHostPort(getBindAddr().String(), "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveTestDNSConn(conn, name, answers)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func serveTestDNSConn(conn net.Conn, name string, answers map[uint16][][]byte) {
+	defer func() { _ = conn.Close() }()
+	for {
+		var size [2]byte
+		if _, err := io.ReadFull(conn, size[:]); err != nil {
+			return
+		}
+		query := make([]byte, binary.BigEndian.Uint16(size[:]))
+		if _, err := io.ReadFull(conn, query); err != nil || len(query) < 12 {
+			return
+		}
+		// Question: labels, then qtype and qclass.
+		var labels []string
+		i := 12
+		for i < len(query) && query[i] != 0 {
+			n := int(query[i])
+			if i+1+n > len(query) {
+				return
+			}
+			labels = append(labels, string(query[i+1:i+1+n]))
+			i += 1 + n
+		}
+		if i+5 > len(query) {
+			return
+		}
+		qend := i + 5
+		qtype := binary.BigEndian.Uint16(query[i+1:])
+		qname := strings.ToLower(strings.Join(labels, ".") + ".")
+
+		var rrs [][]byte
+		rcode := uint16(0)
+		if qname == name {
+			rrs = answers[qtype]
+		} else {
+			rcode = 3 // NXDOMAIN
+		}
+		resp := binary.BigEndian.AppendUint16(nil, binary.BigEndian.Uint16(query))
+		flags := uint16(0x8400) | binary.BigEndian.Uint16(query[2:])&0x0100 | rcode // QR, AA, echo RD
+		resp = binary.BigEndian.AppendUint16(resp, flags)
+		resp = binary.BigEndian.AppendUint16(resp, 1)
+		resp = binary.BigEndian.AppendUint16(resp, uint16(len(rrs)))
+		resp = binary.BigEndian.AppendUint16(resp, 0)
+		resp = binary.BigEndian.AppendUint16(resp, 0)
+		resp = append(resp, query[12:qend]...)
+		for _, rdata := range rrs {
+			rtype := qtype
+			if qtype == dnsTypeANY {
+				rtype = dnsTypeHINFO
+			}
+			resp = append(resp, 0xc0, 12) // name: pointer to the question
+			resp = binary.BigEndian.AppendUint16(resp, rtype)
+			resp = binary.BigEndian.AppendUint16(resp, 1) // class IN
+			resp = binary.BigEndian.AppendUint32(resp, 60)
+			resp = binary.BigEndian.AppendUint16(resp, uint16(len(rdata)))
+			resp = append(resp, rdata...)
+		}
+		out := binary.BigEndian.AppendUint16(nil, uint16(len(resp)))
+		if _, err := conn.Write(append(out, resp...)); err != nil {
+			return
+		}
+	}
+}
+
+// resolvConf writes a resolv.conf naming server and returns its path.
+func resolvConf(t *testing.T, server string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "resolv.conf")
+	if err := os.WriteFile(path, []byte("# test\nsearch example.org\nnameserver "+server+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestResolveAddrTCPFirstRFC8482 covers decision D4: resolvers following
+// RFC 8482 answer ANY queries with a single synthesized HINFO record, so a
+// TCP-first lookup built on an ANY query finds no addresses and silently
+// falls back to the system resolver. The lookup must ask for A and AAAA.
+func TestResolveAddrTCPFirstRFC8482(t *testing.T) {
+	const name = "join.service.consul."
+	server := serveTestDNS(t, name, map[uint16][][]byte{
+		dnsTypeA:    {{127, 0, 0, 1}},
+		dnsTypeAAAA: {net.ParseIP("2001:db8:a0b:12f0::1").To16()},
+		dnsTypeANY:  {append([]byte{7}, "RFC8482"...)},
+	})
+	m := GetMemberlist(t, func(c *Config) {
+		c.DNSConfigPath = resolvConf(t, server)
+		c.Transport = (&MockNetwork{}).NewTransport("local")
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	for _, host := range []string{"join.service.consul", "join.service.consul.", "node1/join.service.consul:4000"} {
+		ips, err := m.resolveAddr(host)
+		if err != nil {
+			t.Fatalf("%s: %v", host, err)
+		}
+		var got []string
+		for _, ip := range ips {
+			got = append(got, joinHostPort(ip.ip.String(), ip.port)+"/"+ip.nodeName)
+		}
+		slices.Sort(got)
+		port, nodeName := strconv.Itoa(m.config.BindPort), ""
+		if strings.Contains(host, "/") {
+			port, nodeName = "4000", "node1"
+		}
+		want := []string{
+			net.JoinHostPort("127.0.0.1", port) + "/" + nodeName,
+			net.JoinHostPort("2001:db8:a0b:12f0::1", port) + "/" + nodeName,
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s resolved to %v, want %v", host, got, want)
+		}
+	}
+}
+
+func TestReadNameservers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resolv.conf")
+	conf := "# comment\n; also a comment\nsearch example.org\nnameserver 10.0.0.1\nnameserver 10.0.0.2:5353 # trailing\nnameserver ::1\nnameserver [fe80::1]:53\noptions ndots:2\nnameserver\n"
+	if err := os.WriteFile(path, []byte(conf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readNameservers(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"10.0.0.1:53", "10.0.0.2:5353", "[::1]:53", "[fe80::1]:53"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("readNameservers = %v, want %v", got, want)
+	}
+	if _, err := readNameservers(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("missing resolv.conf was not an error")
+	}
 }

@@ -5,6 +5,7 @@ package mori
 
 import (
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -92,4 +93,19 @@ func Test_IsValidAddressOverride(t *testing.T) {
 
 	}
 
+}
+
+// TestParseCIDRsReportsEveryInvalidEntry: ParseCIDRs keeps the valid
+// networks and reports each invalid entry in one joined error.
+func TestParseCIDRsReportsEveryInvalidEntry(t *testing.T) {
+	nets, err := ParseCIDRs([]string{"10.0.0.0/8", "bogus", " 192.168.0.0/16 ", "300.1.1.1/8"})
+	if len(nets) != 2 {
+		t.Fatalf("parsed %d networks, want 2", len(nets))
+	}
+	if err == nil || !strings.Contains(err.Error(), "invalid cidr: bogus") || !strings.Contains(err.Error(), "invalid cidr: 300.1.1.1/8") {
+		t.Fatalf("error %v does not report both invalid entries", err)
+	}
+	if nets, err := ParseCIDRs(nil); err != nil || len(nets) != 0 {
+		t.Fatalf("ParseCIDRs(nil) = %v, %v; want empty, nil", nets, err)
+	}
 }

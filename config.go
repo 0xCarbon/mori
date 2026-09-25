@@ -4,6 +4,7 @@
 package mori
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-metrics/compat"
-	"github.com/hashicorp/go-multierror"
 )
 
 type Config struct {
@@ -300,29 +300,21 @@ type Config struct {
 	MsgpackUseNewTimeFormat bool
 }
 
-// ParseCIDRs return a possible empty list of all Network that have been parsed
-// In case of error, it returns succesfully parsed CIDRs and the last error found
+// ParseCIDRs parses every entry of v. It returns the networks that parsed
+// and, if any entry failed, an error joining one error per invalid entry
+// (errors.Join). A nil v yields an empty list.
 func ParseCIDRs(v []string) ([]net.IPNet, error) {
-	nets := make([]net.IPNet, 0)
-	if v == nil {
-		return nets, nil
-	}
-	var errs error
-	hasErrors := false
+	nets := make([]net.IPNet, 0, len(v))
+	var errs []error
 	for _, p := range v {
-		_, net, err := net.ParseCIDR(strings.TrimSpace(p))
+		_, ipNet, err := net.ParseCIDR(strings.TrimSpace(p))
 		if err != nil {
-			err = fmt.Errorf("invalid cidr: %s", p)
-			errs = multierror.Append(errs, err)
-			hasErrors = true
-		} else {
-			nets = append(nets, *net)
+			errs = append(errs, fmt.Errorf("invalid cidr: %s", p))
+			continue
 		}
+		nets = append(nets, *ipNet)
 	}
-	if !hasErrors {
-		errs = nil
-	}
-	return nets, errs
+	return nets, errors.Join(errs...)
 }
 
 // DefaultLANConfig returns a sane set of configurations for Memberlist.
