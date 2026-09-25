@@ -137,7 +137,7 @@ func (t *MockTransport) IngestPacket(conn net.Conn, addr net.Addr, now time.Time
 	// message. This is checked elsewhere for writes coming in directly from
 	// the UDP socket.
 	if n := buf.Len(); n < 1 {
-		return fmt.Errorf("packet too short (%d bytes) %s", n, LogAddress(addr))
+		return fmt.Errorf("packet too short (%d bytes) from %s", n, addr)
 	}
 
 	// Inject the packet.

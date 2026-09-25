@@ -13,6 +13,40 @@
 
 ### Changes
 
+* **BREAKING:** logging uses `log/slog`. `Config.Logger` is a
+  `*slog.Logger` (nil means `slog.Default()`); `Config.LogOutput` is
+  removed, as are the `LogAddress`, `LogConn` and `LogStringAddress`
+  helpers. `NetTransportConfig.Logger` is a `*slog.Logger` too (nil means
+  `slog.Default()`). Records are structured (`error`, `from`, `node`,
+  `addr`, ...) and protocol chatter is at Debug, so the default handler no
+  longer prints it. To silence Mori, set
+  `Config.Logger = slog.New(slog.DiscardHandler)` (was
+  `Config.LogOutput = io.Discard`).
+* **BREAKING:** metrics go to a per-instance `Config.Metrics` sink
+  (interface `MetricSink`) instead of the process-global
+  `github.com/hashicorp/go-metrics` registry; nil disables them.
+  `Config.MetricLabels` and `NetTransportConfig.MetricLabels` are
+  `[]mori.Label`, and `NetTransportConfig.Metrics` feeds the transport's
+  counter. Metric names and kinds are unchanged (listed on `MetricSink`).
+  To keep sending to go-metrics' global sink, adapt it:
+
+  ```go
+  type goMetrics struct{}
+
+  func labels(ls []mori.Label) []metrics.Label {
+  	out := make([]metrics.Label, len(ls))
+  	for i, l := range ls {
+  		out[i] = metrics.Label{Name: l.Name, Value: l.Value}
+  	}
+  	return out
+  }
+  func (goMetrics) IncrCounter(k []string, v float32, l []mori.Label) { metrics.IncrCounterWithLabels(k, v, labels(l)) }
+  func (goMetrics) SetGauge(k []string, v float32, l []mori.Label)    { metrics.SetGaugeWithLabels(k, v, labels(l)) }
+  func (goMetrics) AddSample(k []string, v float32, l []mori.Label)   { metrics.AddSampleWithLabels(k, v, labels(l)) }
+  func (goMetrics) MeasureSince(k []string, t time.Time, l []mori.Label) {
+  	metrics.MeasureSinceWithLabels(k, t, labels(l))
+  }
+  ```
 * The TCP-first DNS lookup in `Join` queries A and AAAA records through
   `net.Resolver` over TCP instead of sending an ANY query with
   `github.com/miekg/dns`. Resolvers following RFC 8482 answer ANY with a

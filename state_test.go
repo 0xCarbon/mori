@@ -6,9 +6,7 @@ package mori
 import (
 	"bytes"
 	"fmt"
-	"log"
 	"net"
-	"os"
 	"reflect"
 	"strconv"
 	"sync"
@@ -17,7 +15,6 @@ import (
 	"time"
 
 	iretry "github.com/0xCarbon/mori/internal/retry"
-	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,7 +25,7 @@ func HostMemberlist(host string, t *testing.T, f func(*Config)) *Memberlist {
 	c.Name = host
 	c.BindAddr = host
 	c.BindPort = 0 // choose a free port
-	c.Logger = log.New(os.Stderr, host+" ", log.LstdFlags)
+	c.Logger = testLogger(t, host)
 	if f != nil {
 		f(c)
 	}
@@ -2467,13 +2464,14 @@ func TestMemberlist_PushPull(t *testing.T) {
 	ip1 := []byte(addr1)
 	ip2 := []byte(addr2)
 
-	sink := registerInMemorySink(t)
+	sink := newRecordingSink()
 
 	ch := make(chan NodeEvent, 3)
 
 	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
 		c.GossipInterval = 10 * time.Second
 		c.PushPullInterval = time.Millisecond
+		c.Metrics = sink
 	})
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
@@ -2510,12 +2508,14 @@ func TestMemberlist_PushPull(t *testing.T) {
 			failf("expected 2 messages from pushPull")
 		}
 
-		instancesMetricName := "consul.usage.test.memberlist.node.instances"
-		verifyGaugeExists(t, "consul.usage.test.memberlist.size.local", sink)
-		verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateAlive.metricsString()), sink)
-		verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateDead.metricsString()), sink)
-		verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateLeft.metricsString()), sink)
-		verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateSuspect.metricsString()), sink)
+		if _, ok := sink.gauge("memberlist.size.local"); !ok {
+			failf("memberlist.size.local gauge not emitted")
+		}
+		for _, s := range nodeStates {
+			if _, ok := sink.gauge("memberlist.node.instances;node_state=" + s.metricsString()); !ok {
+				failf("memberlist.node.instances gauge not emitted for %s", s.metricsString())
+			}
+		}
 	})
 }
 
@@ -2640,47 +2640,6 @@ func testVerifyProtocolSingle(t *testing.T, A [][6]uint8, B [][6]uint8, expect b
 	err := m.verifyProtocol(remote)
 	if (err == nil) != expect {
 		t.Fatalf("bad:\nA: %v\nB: %v\nErr: %s", A, B, err)
-	}
-}
-
-func registerInMemorySink(t *testing.T) *metrics.InmemSink {
-	t.Helper()
-	// Only have a single interval for the test
-	sink := metrics.NewInmemSink(1*time.Minute, 1*time.Minute)
-	cfg := metrics.DefaultConfig("consul.usage.test")
-	cfg.EnableHostname = false
-	if _, err := metrics.NewGlobal(cfg, sink); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	return sink
-}
-
-func getIntervalMetrics(t *testing.T, sink *metrics.InmemSink) *metrics.IntervalMetrics {
-	t.Helper()
-	intervals := sink.Data()
-	require.Len(t, intervals, 1)
-	intv := intervals[0]
-	return intv
-}
-
-func verifyGaugeExists(t *testing.T, name string, sink *metrics.InmemSink) {
-	t.Helper()
-	interval := getIntervalMetrics(t, sink)
-	interval.RLock()
-	defer interval.RUnlock()
-	if _, ok := interval.Gauges[name]; !ok {
-		t.Fatalf("%s gauge not emmited", name)
-	}
-}
-
-func verifySampleExists(t *testing.T, name string, sink *metrics.InmemSink) {
-	t.Helper()
-	interval := getIntervalMetrics(t, sink)
-	interval.RLock()
-	defer interval.RUnlock()
-
-	if _, ok := interval.Samples[name]; !ok {
-		t.Fatalf("%s sample not emmited", name)
 	}
 }
 

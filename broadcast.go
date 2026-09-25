@@ -60,7 +60,7 @@ func (m *Memberlist) encodeAndBroadcast(node string, msgType messageType, msg an
 func (m *Memberlist) encodeBroadcastNotify(node string, msgType messageType, msg any, notify chan struct{}) {
 	buf, err := encode(msgType, msg, m.config.MsgpackUseNewTimeFormat)
 	if err != nil {
-		m.logger.Printf("[ERR] memberlist: Failed to encode message for broadcast: %s", err)
+		m.logger.Error("failed to encode message for broadcast", "error", err)
 	} else {
 		m.queueBroadcast(node, buf.Bytes(), notify)
 	}

@@ -6,14 +6,11 @@ package mori
 import (
 	"errors"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
 	"time"
-
-	"github.com/hashicorp/go-metrics/compat"
 )
 
 type Config struct {
@@ -229,16 +226,11 @@ type Config struct {
 	// at /etc/resolv.conf. It can be overridden via config for easier testing.
 	DNSConfigPath string
 
-	// LogOutput is the writer where logs should be sent. If this is not
-	// set, logging will go to stderr by default. You cannot specify both LogOutput
-	// and Logger at the same time.
-	LogOutput io.Writer
-
-	// Logger is a custom logger which you provide. If Logger is set, it will use
-	// this for the internal logger. If Logger is not set, it will fall back to the
-	// behavior for using LogOutput. You cannot specify both LogOutput and Logger
-	// at the same time.
-	Logger *log.Logger
+	// Logger receives Mori's structured logs. Nil means slog.Default().
+	// Protocol chatter is logged at Debug; conditions an operator should
+	// see at Info, Warn and Error. To silence Mori, pass
+	// slog.New(slog.DiscardHandler).
+	Logger *slog.Logger
 
 	// Size of Memberlist's internal channel which handles UDP messages. The
 	// size of this determines the size of the queue which Memberlist will keep
@@ -286,8 +278,12 @@ type Config struct {
 	// Using [] will block all connections.
 	CIDRsAllowed []net.IPNet
 
-	// MetricLabels is a map of optional labels to apply to all metrics emitted.
-	MetricLabels []metrics.Label
+	// Metrics receives Mori's telemetry (see MetricSink for the metric
+	// list). Nil disables metrics.
+	Metrics MetricSink
+
+	// MetricLabels are labels applied to every metric emitted.
+	MetricLabels []Label
 
 	// QueueCheckInterval is the interval at which we check the message
 	// queue to apply the warning and max depth.

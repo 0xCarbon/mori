@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"reflect"
 	"runtime"
@@ -751,8 +750,10 @@ func TestEncryptDecryptState(t *testing.T) {
 	config := &Config{
 		SecretKey:       []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
 		ProtocolVersion: ProtocolVersionMax,
+		Logger:          testLogger(t, "local"),
 	}
-	sink := registerInMemorySink(t)
+	sink := newRecordingSink()
+	config.Metrics = sink
 
 	m, err := Create(config)
 	if err != nil {
@@ -779,7 +780,9 @@ func TestEncryptDecryptState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	verifySampleExists(t, "consul.usage.test.memberlist.size.remote", sink)
+	if n := sink.sampleCount("memberlist.size.remote"); n != 1 {
+		t.Fatalf("memberlist.size.remote recorded %d samples, want 1", n)
+	}
 
 	if !reflect.DeepEqual(state, plain) {
 		t.Fatalf("Decrypt failed: %v", plain)
@@ -903,8 +906,7 @@ func TestIngestPacket_CRC(t *testing.T) {
 	// Corrupt the checksum
 	in[1] <<= 1
 
-	logs := &bytes.Buffer{}
-	logger := log.New(logs, "", 0)
+	logger, logs := bufferLogger()
 	m.logger = logger
 	m.ingestPacket(in, udp.LocalAddr(), time.Now())
 
@@ -931,10 +933,6 @@ func TestIngestPacket_ExportedFunc_EmptyMessage(t *testing.T) {
 	}()
 
 	emptyConn := &emptyReadNetConn{}
-
-	logs := &bytes.Buffer{}
-	logger := log.New(logs, "", 0)
-	m.logger = logger
 
 	type ingestionAwareTransport interface {
 		IngestPacket(conn net.Conn, addr net.Addr, now time.Time, shouldClose bool) error
@@ -1008,9 +1006,9 @@ func listenUDP(t *testing.T) *net.UDPConn {
 }
 
 func TestHandleCommand(t *testing.T) {
-	var buf bytes.Buffer
+	logger, buf := bufferLogger()
 	m := Memberlist{
-		logger: log.New(&buf, "", 0),
+		logger: logger,
 	}
 	m.handleCommand(nil, &net.TCPAddr{Port: 12345}, time.Now())
 	require.Contains(t, buf.String(), "missing message type byte")
@@ -1020,8 +1018,7 @@ func TestReadRemoteState_Limits(t *testing.T) {
 
 	mockNet := &MockNetwork{}
 	tr := mockNet.NewTransport("node")
-	logs := &bytes.Buffer{}
-	logger := log.New(logs, "", 0)
+	logger, logs := bufferLogger()
 
 	m := GetMemberlist(t, func(c *Config) {
 		c.EnableCompression = false

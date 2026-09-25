@@ -4,30 +4,22 @@
 package mori
 
 import (
-	"fmt"
+	"log/slog"
 	"net"
 )
 
-func LogAddress(addr net.Addr) string {
+// addrAttr is the log attribute for a peer address.
+func addrAttr(addr net.Addr) slog.Attr {
 	if addr == nil {
-		return "from=<unknown address>"
+		return slog.String("from", "<unknown address>")
 	}
-
-	return fmt.Sprintf("from=%s", addr.String())
+	return slog.String("from", addr.String())
 }
 
-func LogStringAddress(addr string) string {
-	if addr == "" {
-		return "from=<unknown address>"
-	}
-
-	return fmt.Sprintf("from=%s", addr)
-}
-
-func LogConn(conn net.Conn) string {
+// connAttr is the log attribute for a stream's remote address.
+func connAttr(conn net.Conn) slog.Attr {
 	if conn == nil {
-		return LogAddress(nil)
+		return addrAttr(nil)
 	}
-
-	return LogAddress(conn.RemoteAddr())
+	return addrAttr(conn.RemoteAddr())
 }

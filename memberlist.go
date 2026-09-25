@@ -23,7 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"net"
 	"os"
@@ -32,8 +32,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	metrics "github.com/hashicorp/go-metrics/compat"
 )
 
 var errNodeNamesAreRequired = errors.New("memberlist: node names are required by configuration but one was not provided")
@@ -146,10 +144,9 @@ type Memberlist struct {
 	// UDPBufferSize is unset). Zero or negative means no packet budget.
 	packetBufferSize int
 
-	logger *log.Logger
+	logger *slog.Logger
 
-	// metricLabels is the slice of labels to put on all emitted metrics
-	metricLabels []metrics.Label
+	metrics *telemetry
 }
 
 // BuildVsnArray creates the array of Vsn
@@ -189,18 +186,9 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		}
 	}
 
-	if conf.LogOutput != nil && conf.Logger != nil {
-		return nil, fmt.Errorf("cannot specify both LogOutput and Logger; please choose a single log configuration setting")
-	}
-
-	logDest := conf.LogOutput
-	if logDest == nil {
-		logDest = os.Stderr
-	}
-
 	logger := conf.Logger
 	if logger == nil {
-		logger = log.New(logDest, "", log.LstdFlags)
+		logger = slog.Default()
 	}
 
 	// Set up a network transport by default if a custom one wasn't given
@@ -211,6 +199,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 			BindAddrs:    []string{conf.BindAddr},
 			BindPort:     conf.BindPort,
 			Logger:       logger,
+			Metrics:      conf.Metrics,
 			MetricLabels: conf.MetricLabels,
 		}
 
@@ -223,7 +212,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 					return nt, nil
 				}
 				if strings.Contains(err.Error(), "address already in use") {
-					logger.Printf("[DEBUG] memberlist: Got bind error: %v", err)
+					logger.Debug("got bind error", "error", err)
 					continue
 				}
 			}
@@ -250,14 +239,14 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 			port := nt.GetAutoBindPort()
 			conf.BindPort = port
 			conf.AdvertisePort = port
-			logger.Printf("[DEBUG] memberlist: Using dynamic bind port %d", port)
+			logger.Debug("using dynamic bind port", "port", port)
 		}
 		transport = nt
 	}
 
 	nodeAwareTransport, ok := transport.(NodeAwareTransport)
 	if !ok {
-		logger.Printf("[DEBUG] memberlist: configured Transport is not a NodeAwareTransport and some features may not work as desired")
+		logger.Debug("configured Transport is not a NodeAwareTransport and some features may not work as desired")
 		nodeAwareTransport = &shimNodeAwareTransport{transport}
 	}
 
@@ -272,6 +261,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		}
 	}
 
+	metrics := newTelemetry(conf.Metrics, conf.MetricLabels)
 	m := &Memberlist{
 		config:               conf,
 		shutdownCh:           make(chan struct{}),
@@ -286,11 +276,11 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		lowPriorityMsgQueue:  list.New(),
 		nodeMap:              make(map[string]*nodeState),
 		nodeTimers:           make(map[string]*suspicion),
-		awareness:            newAwareness(conf.AwarenessMaxMultiplier, conf.MetricLabels),
+		awareness:            newAwareness(conf.AwarenessMaxMultiplier, metrics),
 		ackHandlers:          make(map[uint32]*ackHandler),
 		broadcasts:           &TransmitLimitedQueue{RetransmitMult: conf.RetransmitMult},
 		logger:               logger,
-		metricLabels:         conf.MetricLabels,
+		metrics:              metrics,
 	}
 	m.broadcasts.NumNodes = func() int {
 		return m.estNumNodes()
@@ -313,7 +303,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 	// with no clear signal.
 	if err := m.validateMetaMaxSize(); err != nil {
 		if serr := m.transport.Shutdown(); serr != nil {
-			logger.Printf("[ERR] Failed to shutdown transport: %v", serr)
+			logger.Error("failed to shut down transport", "error", serr)
 		}
 		return nil, err
 	}
@@ -380,7 +370,7 @@ func (m *Memberlist) Join(existing []string) (int, error) {
 		if err != nil {
 			err = fmt.Errorf("failed to resolve %s: %w", exist, err)
 			errs = append(errs, err)
-			m.logger.Printf("[WARN] memberlist: %v", err)
+			m.logger.Warn("join: failed to resolve", "error", err)
 			continue
 		}
 
@@ -390,7 +380,7 @@ func (m *Memberlist) Join(existing []string) (int, error) {
 			if err := m.pushPullNode(a, true); err != nil {
 				err = fmt.Errorf("failed to join %s: %w", a.Addr, err)
 				errs = append(errs, err)
-				m.logger.Printf("[DEBUG] memberlist: %v", err)
+				m.logger.Debug("join: failed to join", "error", err)
 				continue
 			}
 			numSuccess++
@@ -529,7 +519,7 @@ func (m *Memberlist) resolveAddr(hostStr string) ([]ipPort, error) {
 	// way to query DNS, and we have a fallback below.
 	ips, err := m.tcpLookupIP(host, port, nodeName)
 	if err != nil {
-		m.logger.Printf("[DEBUG] memberlist: TCP-first lookup failed for '%s', falling back to UDP: %s", hostStr, err)
+		m.logger.Debug("TCP-first lookup failed, falling back to the system resolver", "host", hostStr, "error", err)
 	}
 	if len(ips) > 0 {
 		return ips, nil
@@ -562,7 +552,7 @@ func (m *Memberlist) setAlive(receipt *eventReceipt) error {
 
 	// Check if this is a public address without encryption
 	if isPublicAddress(addr) && !m.config.EncryptionEnabled() {
-		m.logger.Printf("[WARN] memberlist: Binding to public address without encryption!")
+		m.logger.Warn("binding to a public address without encryption", "addr", addr)
 	}
 
 	// Set any metadata from the delegate.
@@ -1245,7 +1235,7 @@ func (m *Memberlist) Shutdown() error {
 		// completely torn down. If we kill the memberlist-side handlers
 		// those I/O handlers might get stuck.
 		if err := m.transport.Shutdown(); err != nil {
-			m.logger.Printf("[ERR] Failed to shutdown transport: %v", err)
+			m.logger.Error("failed to shut down transport", "error", err)
 		}
 
 		// Now tear down everything else.
@@ -1346,7 +1336,7 @@ func (m *Memberlist) checkBroadcastQueueDepth() {
 		select {
 		case <-time.After(m.config.QueueCheckInterval):
 			numq := m.broadcasts.NumQueued()
-			metrics.AddSampleWithLabels([]string{"memberlist", "queue", "broadcasts"}, float32(numq), m.metricLabels)
+			m.metrics.sample(keyQueueBroadcasts, float32(numq))
 		case <-m.shutdownCh:
 			return
 		}

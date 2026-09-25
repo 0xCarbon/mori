@@ -7,8 +7,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-
-	metrics "github.com/hashicorp/go-metrics/compat"
 )
 
 // Event delivery (issue #6).
@@ -94,10 +92,10 @@ func (m *Memberlist) enqueueEventLocked(kind eventKind, node *Node, other *Node,
 	pending := m.eventPending
 	m.eventMu.Unlock()
 
-	metrics.SetGaugeWithLabels([]string{"memberlist", "event", "pending"}, float32(pending), m.metricLabels)
+	m.metrics.gauge(keyEventPending, float32(pending))
 	for _, th := range eventPendingWarnThresholds {
 		if pending == th+1 {
-			m.logger.Printf("[WARN] memberlist: event queue depth crossed %d: event consumer is slow or blocked", th)
+			m.logger.Warn("event queue depth crossed a threshold: event consumer is slow or blocked", "threshold", th)
 		}
 	}
 
@@ -143,8 +141,8 @@ func (m *Memberlist) eventDispatch() {
 		m.eventPending--
 		pending := m.eventPending
 		m.eventMu.Unlock()
-		metrics.SetGaugeWithLabels([]string{"memberlist", "event", "pending"}, float32(pending), m.metricLabels)
-		metrics.IncrCounterWithLabels([]string{"memberlist", "event", "delivered"}, 1, m.metricLabels)
+		m.metrics.gauge(keyEventPending, float32(pending))
+		m.metrics.counter(keyEventDelivered, 1)
 	}
 }
 

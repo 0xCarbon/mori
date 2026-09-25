@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -50,7 +49,7 @@ func testConfigNet(tb testing.TB, network byte) *Config {
 	config.Name = config.BindAddr
 	config.BindPort = 0 // choose free port
 	config.RequireNodeNames = true
-	config.Logger = log.New(os.Stderr, config.Name, log.LstdFlags)
+	config.Logger = testLogger(tb, config.Name)
 	return config
 }
 
@@ -253,11 +252,11 @@ func TestCreate_secretKeyEmpty(t *testing.T) {
 }
 
 func TestCreate_checkBroadcastQueueMetrics(t *testing.T) {
-	sink := registerInMemorySink(t)
-	c := DefaultLANConfig()
-	c.QueueCheckInterval = 1 * time.Second
-	c.BindAddr = getBindAddr().String()
+	sink := newRecordingSink()
+	c := testConfig(t)
+	c.QueueCheckInterval = 10 * time.Millisecond
 	c.SecretKey = make([]byte, 0)
+	c.Metrics = sink
 
 	m, err := Create(c)
 	require.NoError(t, err)
@@ -268,17 +267,9 @@ func TestCreate_checkBroadcastQueueMetrics(t *testing.T) {
 	}()
 
 	// The first sample lands one QueueCheckInterval after Create.
-	sampleName := "consul.usage.test.memberlist.queue.broadcasts"
 	iretry.Run(t, func(r *iretry.R) {
-		intervals := sink.Data()
-		if len(intervals) != 1 {
-			r.Fatalf("%d metric intervals, want 1", len(intervals))
-		}
-		intervals[0].RLock()
-		_, ok := intervals[0].Samples[sampleName]
-		intervals[0].RUnlock()
-		if !ok {
-			r.Fatalf("%s sample not emitted", sampleName)
+		if sink.sampleCount("memberlist.queue.broadcasts") == 0 {
+			r.Fatalf("memberlist.queue.broadcasts sample not emitted")
 		}
 	})
 }
@@ -328,19 +319,6 @@ func TestCreate_keyringAndSecretKey(t *testing.T) {
 	ringKeys := c.Keyring.GetKeys()
 	if !bytes.Equal(c.SecretKey, ringKeys[0]) {
 		t.Fatalf("Unexpected primary key %v", ringKeys[0])
-	}
-}
-
-func TestCreate_invalidLoggerSettings(t *testing.T) {
-	c := DefaultLANConfig()
-	c.BindAddr = getBindAddr().String()
-	c.Logger = log.New(io.Discard, "", log.LstdFlags)
-	c.LogOutput = io.Discard
-
-	m, err := Create(c)
-	if err == nil {
-		require.NoError(t, m.Shutdown())
-		t.Fatal("Memberlist should not allow both LogOutput and Logger to be set, but it did not raise an error")
 	}
 }
 
@@ -1654,7 +1632,7 @@ func TestMemberlist_Join_IPv6(t *testing.T) {
 	c1.Name = "A"
 	c1.BindAddr = "[::1]"
 	c1.BindPort = 0 // choose free
-	c1.Logger = log.New(os.Stderr, c1.Name, log.LstdFlags)
+	c1.Logger = testLogger(t, c1.Name)
 
 	m1, err := Create(c1)
 	require.NoError(t, err)
@@ -1669,7 +1647,7 @@ func TestMemberlist_Join_IPv6(t *testing.T) {
 	c2.Name = "B"
 	c2.BindAddr = "[::1]"
 	c2.BindPort = 0 // choose free
-	c2.Logger = log.New(os.Stderr, c2.Name, log.LstdFlags)
+	c2.Logger = testLogger(t, c2.Name)
 
 	m2, err := Create(c2)
 	require.NoError(t, err)
@@ -2015,7 +1993,7 @@ func TestMemberlist_EncryptedGossipTransition(t *testing.T) {
 		// Set the gossip interval fast enough to get a reasonable test,
 		// but slow enough to avoid "sendto: operation not permitted"
 		conf.GossipInterval = 100 * time.Millisecond
-		conf.Logger = log.New(os.Stderr, shortName, log.LstdFlags)
+		conf.Logger = testLogger(t, shortName)
 
 		pretty[conf.Name] = shortName
 		return conf

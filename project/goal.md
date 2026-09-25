@@ -55,7 +55,7 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
 | W1 | Upstream security fixes (#361 #363 #368 #369) + local hardening of the same classes | done |
 | W2 | Tooling: go 1.27.1, Makefile `ci`, `tools/checkdeps`, `tools/benchcmp`, CI workflow, AGENTS.md | done |
 | W3 | Small deps: go-multierror, sean-/seed, go-sockaddr, miekg/dns, google/btree | done |
-| W4 | Telemetry: `Config.Metrics` sink replaces go-metrics; `log/slog` replaces `log` | pending |
+| W4 | Telemetry: `Config.Metrics` sink replaces go-metrics; `log/slog` replaces `log` | done |
 | W5 | Wire codec: `internal/msgpack` + `internal/wire`, golden vectors, differential evidence; drop go-msgpack | pending |
 | W6 | Tests: testify/goleak -> std; synctest for timer-driven tests; flake removal | pending |
 | W7 | Performance: UDP receive buffer reuse, encode/decode allocations, benchmarks + evidence | pending |
@@ -105,6 +105,12 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
   go-sockaddr on this host (evidence/w3/sockaddr-differential.txt).
   Deflaked TestMemberlist_Join_Cancel and the queue-metrics test (race
   timing), both pre-existing.
+
+- 2026-09-25 W4: 95 log sites -> slog (structured, Debug for protocol
+  chatter); per-instance MetricSink with precomputed keys and node_state
+  label sets (nil sink: 0 allocs, tested); go-metrics and its 3 indirects
+  removed; ratchet 10 -> 7 (kr/text surfaced as a testify indirect).
+  Tests log to t.Output() through a writer that goes quiet at cleanup.
 
 ## Findings to fix (discovered during the waves)
 

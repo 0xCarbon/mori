@@ -3,12 +3,6 @@
 # A ratchet: checkdeps fails when an entry is no longer required. The goal is
 # an empty file; then delete it.
 
-# W4 — telemetry
-github.com/hashicorp/go-metrics      W4: Config.Metrics sink
-github.com/armon/go-metrics          W4: indirect via go-metrics
-github.com/hashicorp/go-immutable-radix W4: indirect via go-metrics
-github.com/hashicorp/golang-lru      W4: indirect via go-metrics
-
 # W5 — wire codec
 github.com/hashicorp/go-msgpack/v2   W5: internal/msgpack + internal/wire
 
@@ -17,4 +11,5 @@ github.com/stretchr/testify          W6: std testing
 github.com/davecgh/go-spew           W6: indirect via testify
 github.com/pmezard/go-difflib        W6: indirect via testify
 gopkg.in/yaml.v3                     W6: indirect via testify
+github.com/kr/text                   W6: indirect via testify (yaml.v3 tests)
 go.uber.org/goleak                   W6: testing/synctest and a goroutine audit
