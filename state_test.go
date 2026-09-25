@@ -15,7 +15,6 @@ import (
 	"time"
 
 	iretry "github.com/0xCarbon/mori/internal/retry"
-	"github.com/stretchr/testify/require"
 )
 
 func HostMemberlist(host string, t *testing.T, f func(*Config)) *Memberlist {
@@ -850,7 +849,7 @@ func TestMemberList_ProbeNode_Awareness_MissedNack(t *testing.T) {
 	m1.aliveNode(&a4, false)
 
 	// Make sure health looks good.
-	require.Equal(t, 0, m1.GetHealthScore())
+	equal(t, 0, m1.GetHealthScore())
 
 	// Have node m1 probe m4, which isn't up
 	n := m1.nodeMap[addr4.String()]
@@ -861,7 +860,7 @@ func TestMemberList_ProbeNode_Awareness_MissedNack(t *testing.T) {
 	// Node should be reported suspect.
 
 	m1.nodeLock.Lock()
-	require.Equal(t, StateSuspect, n.State, "expect node to be suspect")
+	equal(t, StateSuspect, n.State, "expect node to be suspect")
 	m1.nodeLock.Unlock()
 
 	// Make sure we timed out approximately on time.
@@ -1186,11 +1185,11 @@ func TestMemberList_setProbeChannels(t *testing.T) {
 	ch := make(chan ackMessage, 1)
 	m.setProbeChannels(0, ch, nil, 10*time.Millisecond)
 
-	require.True(t, ackHandlerExists(t, m), "missing handler")
+	isTrue(t, ackHandlerExists(t, m), "missing handler")
 
 	time.Sleep(20 * time.Millisecond)
 
-	require.False(t, ackHandlerExists(t, m), "non-reaped handler")
+	isFalse(t, ackHandlerExists(t, m), "non-reaped handler")
 }
 
 func TestMemberList_setAckHandler(t *testing.T) {
@@ -1199,11 +1198,11 @@ func TestMemberList_setAckHandler(t *testing.T) {
 	f := func([]byte, time.Time) {}
 	m.setAckHandler(0, f, 10*time.Millisecond)
 
-	require.True(t, ackHandlerExists(t, m), "missing handler")
+	isTrue(t, ackHandlerExists(t, m), "missing handler")
 
 	time.Sleep(20 * time.Millisecond)
 
-	require.False(t, ackHandlerExists(t, m), "non-reaped handler")
+	isFalse(t, ackHandlerExists(t, m), "non-reaped handler")
 }
 
 func TestMemberList_invokeAckHandler(t *testing.T) {
@@ -1222,7 +1221,7 @@ func TestMemberList_invokeAckHandler(t *testing.T) {
 		t.Fatalf("b not set")
 	}
 
-	require.False(t, ackHandlerExists(t, m), "non-reaped handler")
+	isFalse(t, ackHandlerExists(t, m), "non-reaped handler")
 }
 
 func TestMemberList_invokeAckHandler_Channel_Ack(t *testing.T) {
@@ -1256,7 +1255,7 @@ func TestMemberList_invokeAckHandler_Channel_Ack(t *testing.T) {
 		t.Fatalf("message not sent")
 	}
 
-	require.False(t, ackHandlerExists(t, m), "non-reaped handler")
+	isFalse(t, ackHandlerExists(t, m), "non-reaped handler")
 }
 
 func TestMemberList_invokeAckHandler_Channel_Nack(t *testing.T) {
@@ -1287,7 +1286,7 @@ func TestMemberList_invokeAckHandler_Channel_Nack(t *testing.T) {
 
 	// Getting a nack doesn't reap the handler so that we can still forward
 	// an ack up to the reap time, if we get one.
-	require.True(t, ackHandlerExists(t, m), "handler should not be reaped")
+	isTrue(t, ackHandlerExists(t, m), "handler should not be reaped")
 
 	ack := ackResp{SeqNo: 0, Payload: []byte{0, 0, 0}}
 	m.invokeAckHandler(ack, time.Now())
@@ -1308,7 +1307,7 @@ func TestMemberList_invokeAckHandler_Channel_Nack(t *testing.T) {
 		t.Fatalf("message not sent")
 	}
 
-	require.False(t, ackHandlerExists(t, m), "non-reaped handler")
+	isFalse(t, ackHandlerExists(t, m), "non-reaped handler")
 }
 
 func TestMemberList_AliveNode_NewNode(t *testing.T) {

@@ -1,5 +1,5 @@
-# Copyright (c) HashiCorp, Inc.
-# SPDX-License-Identifier: MPL-2.0
+# Mori has no Go module dependencies (see AGENTS.md); only CI actions are
+# tracked.
 
 version: 2
 updates:
@@ -14,20 +14,3 @@ updates:
       actions:
         patterns:
           - "*"
-      
-  - package-ecosystem: "gomod"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "sunday"
-    commit-message:
-      prefix: "[chore] : "
-    groups:
-      go:
-        patterns:
-          - "*"
-        applies-to: "version-updates"
-      go-security:
-        patterns:
-          - "*"
-        applies-to: "security-updates"

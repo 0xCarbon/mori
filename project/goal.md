@@ -119,6 +119,12 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
   4 allocs per alive decode (one per variable field). F4 fixed. Deflaked
   TestMemberlist_Join_IPv6 (responder merges after replying).
 
+- 2026-09-25 W6a: testify -> std helpers (helpers_test.go, same argument
+  order, bytes compared by content like testify), goleak -> in-repo
+  goroutine diff (self-tested). go.mod has zero requirements; ratchet file
+  deleted; checkdeps now enforces the final policy (root module requires
+  nothing; nested modules only under tools/ with x/ or 0xCarbon deps).
+
 ## Findings to fix (discovered during the waves)
 
 - F1 (W3): `nodeState.State` shadows the embedded `Node.State`, so the

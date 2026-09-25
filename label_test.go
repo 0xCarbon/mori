@@ -9,8 +9,6 @@ import (
 	"net"
 	"strings"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestAddLabelHeaderToPacket(t *testing.T) {
@@ -24,11 +22,11 @@ func TestAddLabelHeaderToPacket(t *testing.T) {
 	run := func(t *testing.T, tc testcase) {
 		got, err := AddLabelHeaderToPacket(tc.buf, tc.label)
 		if tc.expectErr != "" {
-			require.Error(t, err)
-			require.Contains(t, err.Error(), tc.expectErr)
+			isErr(t, err)
+			contains(t, err.Error(), tc.expectErr)
 		} else {
-			require.NoError(t, err)
-			require.Equal(t, tc.expectPacket, got)
+			noErr(t, err)
+			equal(t, tc.expectPacket, got)
 		}
 	}
 
@@ -85,12 +83,12 @@ func TestRemoveLabelHeaderFromPacket(t *testing.T) {
 	run := func(t *testing.T, tc testcase) {
 		gotBuf, gotLabel, err := RemoveLabelHeaderFromPacket(tc.buf)
 		if tc.expectErr != "" {
-			require.Error(t, err)
-			require.Contains(t, err.Error(), tc.expectErr)
+			isErr(t, err)
+			contains(t, err.Error(), tc.expectErr)
 		} else {
-			require.NoError(t, err)
-			require.Equal(t, tc.expectPacket, gotBuf)
-			require.Equal(t, tc.expectLabel, gotLabel)
+			noErr(t, err)
+			equal(t, tc.expectPacket, gotBuf)
+			equal(t, tc.expectLabel, gotLabel)
 		}
 	}
 
@@ -188,11 +186,11 @@ func TestAddLabelHeaderToStream(t *testing.T) {
 
 		err := AddLabelHeaderToStream(client, tc.label)
 		if tc.expectErr != "" {
-			require.Error(t, err)
-			require.Contains(t, err.Error(), tc.expectErr)
+			isErr(t, err)
+			contains(t, err.Error(), tc.expectErr)
 			return
 		}
-		require.NoError(t, err)
+		noErr(t, err)
 
 		_, _ = client.Write([]byte(suffixData))
 		_ = client.Close()
@@ -203,9 +201,9 @@ func TestAddLabelHeaderToStream(t *testing.T) {
 
 		select {
 		case err := <-errCh:
-			require.NoError(t, err)
+			noErr(t, err)
 		case got := <-dataCh:
-			require.Equal(t, expect, got)
+			equal(t, expect, got)
 		}
 	}
 
@@ -267,17 +265,17 @@ func TestRemoveLabelHeaderFromStream(t *testing.T) {
 
 		newConn, gotLabel, err := RemoveLabelHeaderFromStream(client)
 		if tc.expectErr != "" {
-			require.Error(t, err)
-			require.Contains(t, err.Error(), tc.expectErr)
+			isErr(t, err)
+			contains(t, err.Error(), tc.expectErr)
 			return
 		}
-		require.NoError(t, err)
+		noErr(t, err)
 
 		gotBuf, err := io.ReadAll(newConn)
-		require.NoError(t, err)
+		noErr(t, err)
 
-		require.Equal(t, tc.expectData, gotBuf)
-		require.Equal(t, tc.expectLabel, gotLabel)
+		equal(t, tc.expectData, gotBuf)
+		equal(t, tc.expectLabel, gotLabel)
 	}
 
 	cases := map[string]testcase{
@@ -369,7 +367,7 @@ func buildBuffer(t *testing.T, stuff ...any) []byte {
 }
 
 func TestLabelOverhead(t *testing.T) {
-	require.Equal(t, 0, labelOverhead(""))
-	require.Equal(t, 3, labelOverhead("a"))
-	require.Equal(t, 9, labelOverhead("abcdefg"))
+	equal(t, 0, labelOverhead(""))
+	equal(t, 3, labelOverhead("a"))
+	equal(t, 9, labelOverhead("abcdefg"))
 }

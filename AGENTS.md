@@ -18,12 +18,14 @@ behavioral contract per release), then code comments.
 
 - **Go 1.27.1, `CGO_ENABLED=0`, `GOTOOLCHAIN=local`** for every build, vet
   and test. The one exception is `make race`: the race detector needs cgo.
-- **Standard library only.** Library packages (everything outside `tools/`)
-  import only the standard library and this module. Tools and tests may add
-  official `golang.org/x/` or `github.com/0xCarbon/` modules only with a
-  written reason the standard library is insufficient. `make check-deps`
-  enforces this; during the v0.8 transition the remaining exceptions are
-  listed in `project/deps-transition.txt`, a ratchet that only shrinks.
+- **Standard library only.** The root module (library, tests and in-module
+  tools) has no `require` line: every package, tests included, imports only
+  the standard library and this module. A tool that genuinely needs more
+  lives in its own module under `tools/` and may use only official
+  `golang.org/x/` or `github.com/0xCarbon/` modules, with a written reason
+  the standard library is insufficient. `make check-deps` enforces this.
+  Frozen evidence modules under `project/evidence/` may pin whatever they
+  compare against (for example go-msgpack) and are never built by `make`.
 - No project-authored `unsafe`, assembly or object files.
 - `make ci` passes before every commit. It runs gofmt, `go fix -diff`
   (modernizers), vet, golangci-lint (`.golangci.yml`), build, cross builds,

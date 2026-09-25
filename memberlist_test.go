@@ -21,7 +21,6 @@ import (
 	"time"
 
 	iretry "github.com/0xCarbon/mori/internal/retry"
-	"github.com/stretchr/testify/require"
 )
 
 var bindLock sync.Mutex
@@ -156,7 +155,7 @@ func GetMemberlist(tb testing.TB, f func(c *Config)) *Memberlist {
 	}
 
 	m, err := newMemberlist(c)
-	require.NoError(tb, err)
+	noErr(tb, err)
 	return m
 }
 
@@ -189,7 +188,7 @@ func TestCreate_protocolVersion(t *testing.T) {
 
 			m, err := Create(c)
 			if err == nil {
-				require.NoError(t, m.Shutdown())
+				noErr(t, m.Shutdown())
 			}
 
 			if tc.err && err == nil {
@@ -221,7 +220,7 @@ func TestCreate_secretKey(t *testing.T) {
 
 			m, err := Create(c)
 			if err == nil {
-				require.NoError(t, m.Shutdown())
+				noErr(t, m.Shutdown())
 			}
 
 			if tc.err && err == nil {
@@ -239,7 +238,7 @@ func TestCreate_secretKeyEmpty(t *testing.T) {
 	c.SecretKey = make([]byte, 0)
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -259,7 +258,7 @@ func TestCreate_checkBroadcastQueueMetrics(t *testing.T) {
 	c.Metrics = sink
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -279,11 +278,11 @@ func TestCreate_keyringOnly(t *testing.T) {
 	c.BindAddr = getBindAddr().String()
 
 	keyring, err := NewKeyring(nil, make([]byte, 16))
-	require.NoError(t, err)
+	noErr(t, err)
 	c.Keyring = keyring
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -300,12 +299,12 @@ func TestCreate_keyringAndSecretKey(t *testing.T) {
 	c.BindAddr = getBindAddr().String()
 
 	keyring, err := NewKeyring(nil, make([]byte, 16))
-	require.NoError(t, err)
+	noErr(t, err)
 	c.Keyring = keyring
 	c.SecretKey = []byte{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -330,7 +329,7 @@ func TestCreate(t *testing.T) {
 	c.DelegateProtocolMax = 24
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -372,7 +371,7 @@ func TestCreate(t *testing.T) {
 func TestMemberList_CreateShutdown(t *testing.T) {
 	m := GetMemberlist(t, nil)
 	m.schedule()
-	require.NoError(t, m.Shutdown())
+	noErr(t, m.Shutdown())
 }
 
 func TestMemberList_ResolveAddr(t *testing.T) {
@@ -502,9 +501,9 @@ func TestMemberList_ResolveAddr(t *testing.T) {
 			t.Parallel()
 			got, err := m.resolveAddr(tc.in)
 			if tc.expectErr {
-				require.Error(t, err)
+				isErr(t, err)
 			} else {
-				require.NoError(t, err)
+				noErr(t, err)
 				if tc.ignoreExpectIP {
 					if len(got) > 1 {
 						got = got[0:1]
@@ -513,7 +512,7 @@ func TestMemberList_ResolveAddr(t *testing.T) {
 						got[i].ip = nil
 					}
 				}
-				require.Equal(t, tc.expect, got)
+				equal(t, tc.expect, got)
 			}
 		})
 	}
@@ -541,7 +540,7 @@ func TestMemberList_Members(t *testing.T) {
 func TestMemberlist_Join(t *testing.T) {
 	c1 := testConfig(t)
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -555,7 +554,7 @@ func TestMemberlist_Join(t *testing.T) {
 	c2.BindPort = bindPort
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -591,7 +590,7 @@ func testMemberlist_Join_with_Labels(t *testing.T, secretKey []byte) {
 	c1.Label = "blah"
 	c1.SecretKey = secretKey
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -606,7 +605,7 @@ func testMemberlist_Join_with_Labels(t *testing.T, secretKey []byte) {
 	c2.BindPort = bindPort
 	c2.SecretKey = secretKey
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -615,8 +614,8 @@ func testMemberlist_Join_with_Labels(t *testing.T, secretKey []byte) {
 
 	runStep(t, "same label can join", func(t *testing.T) {
 		num, err := m2.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
-		require.NoError(t, err)
-		require.Equal(t, 1, num)
+		noErr(t, err)
+		equal(t, 1, num)
 
 		// Wait for cluster convergence (both members and estimate)
 		waitUntilSizeAndEstimate(t, m2, 2)
@@ -629,7 +628,7 @@ func testMemberlist_Join_with_Labels(t *testing.T, secretKey []byte) {
 	c3.BindPort = bindPort
 	c3.SecretKey = secretKey
 	m3, err := Create(c3)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m3.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -637,7 +636,7 @@ func testMemberlist_Join_with_Labels(t *testing.T, secretKey []byte) {
 	}()
 	runStep(t, "no label cannot join", func(t *testing.T) {
 		_, err := m3.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
-		require.Error(t, err)
+		isErr(t, err)
 
 		// Verify cluster state remains unchanged after failed join
 		waitUntilSizeAndEstimate(t, m3, 1)
@@ -651,7 +650,7 @@ func testMemberlist_Join_with_Labels(t *testing.T, secretKey []byte) {
 	c4.BindPort = bindPort
 	c4.SecretKey = secretKey
 	m4, err := Create(c4)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m4.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -660,7 +659,7 @@ func testMemberlist_Join_with_Labels(t *testing.T, secretKey []byte) {
 
 	runStep(t, "mismatched label cannot join", func(t *testing.T) {
 		_, err := m4.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
-		require.Error(t, err)
+		isErr(t, err)
 
 		// Verify cluster state remains unchanged after failed join
 		waitUntilSizeAndEstimate(t, m4, 1)
@@ -674,7 +673,7 @@ func TestMemberlist_JoinDifferentNetworksUniqueMask(t *testing.T) {
 	c1 := testConfigNet(t, 0)
 	c1.CIDRsAllowed, _ = ParseCIDRs([]string{"127.0.0.0/8"})
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -689,7 +688,7 @@ func TestMemberlist_JoinDifferentNetworksUniqueMask(t *testing.T) {
 	c2.BindPort = bindPort
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -717,7 +716,7 @@ func TestMemberlist_JoinDifferentNetworksMultiMasks(t *testing.T) {
 	c1 := testConfigNet(t, 0)
 	c1.CIDRsAllowed, _ = ParseCIDRs([]string{"127.0.0.0/24", "127.0.1.0/24"})
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -732,7 +731,7 @@ func TestMemberlist_JoinDifferentNetworksMultiMasks(t *testing.T) {
 	c2.BindPort = bindPort
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -751,7 +750,7 @@ func TestMemberlist_JoinDifferentNetworksMultiMasks(t *testing.T) {
 	c3.BindPort = bindPort
 
 	m3, err := Create(c3)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m3.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -787,7 +786,7 @@ func TestMemberlist_JoinDifferentNetworksMultiMasks(t *testing.T) {
 	c4.BindPort = bindPort
 
 	m4, err := Create(c4)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m4.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -829,7 +828,7 @@ func TestMemberlist_Join_Cancel(t *testing.T) {
 	c1.Merge = merge1
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -845,7 +844,7 @@ func TestMemberlist_Join_Cancel(t *testing.T) {
 	c2.Merge = merge2
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -906,7 +905,7 @@ func TestMemberlist_Join_Cancel_Passive(t *testing.T) {
 	c1.Alive = alive1
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -925,7 +924,7 @@ func TestMemberlist_Join_Cancel_Passive(t *testing.T) {
 	c2.Alive = alive2
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -961,7 +960,7 @@ func TestMemberlist_Join_protocolVersions(t *testing.T) {
 	c1 := testConfig(t)
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -974,7 +973,7 @@ func TestMemberlist_Join_protocolVersions(t *testing.T) {
 	c2.BindPort = bindPort
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -986,7 +985,7 @@ func TestMemberlist_Join_protocolVersions(t *testing.T) {
 	c3.ProtocolVersion = ProtocolVersionMax
 
 	m3, err := Create(c3)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m3.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -994,12 +993,12 @@ func TestMemberlist_Join_protocolVersions(t *testing.T) {
 	}()
 
 	_, err = m1.Join([]string{c2.Name + "/" + c2.BindAddr})
-	require.NoError(t, err)
+	noErr(t, err)
 
 	yield()
 
 	_, err = m1.Join([]string{c3.Name + "/" + c3.BindAddr})
-	require.NoError(t, err)
+	noErr(t, err)
 }
 
 func joinAndTestMemberShip(t *testing.T, self *Memberlist, membersToJoin []string, expectedMembers int) error {
@@ -1034,7 +1033,7 @@ func TestMemberlist_Leave(t *testing.T) {
 	c1 := newConfig()
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1048,7 +1047,7 @@ func TestMemberlist_Leave(t *testing.T) {
 	c2.BindPort = bindPort
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1062,7 +1061,7 @@ func TestMemberlist_Leave(t *testing.T) {
 
 	// Leave
 	err = m1.Leave(time.Second)
-	require.NoError(t, err)
+	noErr(t, err)
 
 	// Wait for leave
 	time.Sleep(10 * time.Millisecond)
@@ -1093,7 +1092,7 @@ func TestMemberlist_JoinShutdown(t *testing.T) {
 	c1 := newConfig()
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1107,7 +1106,7 @@ func TestMemberlist_JoinShutdown(t *testing.T) {
 	c2.BindPort = bindPort
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1127,7 +1126,7 @@ func TestMemberlist_JoinShutdown(t *testing.T) {
 		t.Fatalf("should have 2 nodes! %v", m2.Members())
 	}
 
-	require.NoError(t, m1.Shutdown())
+	noErr(t, m1.Shutdown())
 
 	waitForCondition(t, func() (bool, string) {
 		n := len(m2.Members())
@@ -1140,7 +1139,7 @@ func TestMemberlist_delegateMeta(t *testing.T) {
 	c1.Delegate = &MockDelegate{meta: []byte("web")}
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1154,7 +1153,7 @@ func TestMemberlist_delegateMeta(t *testing.T) {
 	c2.Delegate = &MockDelegate{meta: []byte("lb")}
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1162,7 +1161,7 @@ func TestMemberlist_delegateMeta(t *testing.T) {
 	}()
 
 	_, err = m1.Join([]string{c2.Name + "/" + c2.BindAddr})
-	require.NoError(t, err)
+	noErr(t, err)
 
 	yield()
 
@@ -1213,7 +1212,7 @@ func TestMemberlist_delegateMeta_Update(t *testing.T) {
 	c1.Delegate = mock1
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1228,7 +1227,7 @@ func TestMemberlist_delegateMeta_Update(t *testing.T) {
 	c2.Delegate = mock2
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1236,7 +1235,7 @@ func TestMemberlist_delegateMeta_Update(t *testing.T) {
 	}()
 
 	_, err = m1.Join([]string{c2.Name + "/" + c2.BindAddr})
-	require.NoError(t, err)
+	noErr(t, err)
 
 	yield()
 
@@ -1245,9 +1244,9 @@ func TestMemberlist_delegateMeta_Update(t *testing.T) {
 	mock2.setMeta([]byte("db"))
 
 	err = m1.UpdateNode(0)
-	require.NoError(t, err)
+	noErr(t, err)
 	err = m2.UpdateNode(0)
-	require.NoError(t, err)
+	noErr(t, err)
 
 	yield()
 
@@ -1309,7 +1308,7 @@ func TestMemberlist_UserData(t *testing.T) {
 	d1.setState([]byte("something"))
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1332,7 +1331,7 @@ func TestMemberlist_UserData(t *testing.T) {
 	d2.setState([]byte("my state"))
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1343,7 +1342,7 @@ func TestMemberlist_UserData(t *testing.T) {
 	if num != 1 {
 		t.Fatalf("unexpected 1: %d", num)
 	}
-	require.NoError(t, err)
+	noErr(t, err)
 
 	// Check the hosts
 	if m2.NumMembers() != 2 {
@@ -1356,7 +1355,7 @@ func TestMemberlist_UserData(t *testing.T) {
 
 		// Ensure we got the messages. Ordering of messages is not guaranteed so just
 		// check we got them both in either order.
-		require.ElementsMatch(r, bcasts, msgs1)
+		elementsMatch(r, bcasts, msgs1)
 
 		rs1 := d1.getRemoteState()
 		rs2 := d2.getRemoteState()
@@ -1384,7 +1383,7 @@ func TestMemberlist_SendTo(t *testing.T) {
 	c1, d1, _ := newConfig()
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1397,7 +1396,7 @@ func TestMemberlist_SendTo(t *testing.T) {
 	c2.BindPort = bindPort
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1405,11 +1404,11 @@ func TestMemberlist_SendTo(t *testing.T) {
 	}()
 
 	num, err := m2.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
-	require.NoError(t, err)
-	require.Equal(t, 1, num)
+	noErr(t, err)
+	equal(t, 1, num)
 
 	// Check the hosts
-	require.Equal(t, 2, m2.NumMembers(), "should have 2 nodes! %v", m2.Members())
+	equal(t, 2, m2.NumMembers(), "should have 2 nodes! %v", m2.Members())
 
 	// Try to do a direct send
 	m2Addr := &net.UDPAddr{
@@ -1476,7 +1475,7 @@ func TestMemberlistProtocolVersion(t *testing.T) {
 	c.ProtocolVersion = ProtocolVersionMax
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1494,7 +1493,7 @@ func TestMemberlist_Join_DeadNode(t *testing.T) {
 	c1.TCPTimeout = 50 * time.Millisecond
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1541,7 +1540,7 @@ func TestMemberlist_Join_Protocol_Compatibility(t *testing.T) {
 		c1.ProtocolVersion = pv1
 
 		m1, err := Create(c1)
-		require.NoError(t, err)
+		noErr(t, err)
 		defer func() {
 			if err := m1.Shutdown(); err != nil {
 				t.Fatal(err)
@@ -1555,7 +1554,7 @@ func TestMemberlist_Join_Protocol_Compatibility(t *testing.T) {
 		c2.ProtocolVersion = pv2
 
 		m2, err := Create(c2)
-		require.NoError(t, err)
+		noErr(t, err)
 		defer func() {
 			if err := m2.Shutdown(); err != nil {
 				t.Fatal(err)
@@ -1563,8 +1562,8 @@ func TestMemberlist_Join_Protocol_Compatibility(t *testing.T) {
 		}()
 
 		num, err := m2.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
-		require.NoError(t, err)
-		require.Equal(t, 1, num)
+		noErr(t, err)
+		equal(t, 1, num)
 
 		// Wait for cluster convergence
 		waitUntilSize(t, m2, 2)
@@ -1594,14 +1593,14 @@ func isIPv6LoopbackAvailable(t *testing.T) bool {
 	const ipv6LoopbackAddress = "::1"
 	ipv6LoopbackAvailableOnce.Do(func() {
 		ifaces, err := net.Interfaces()
-		require.NoError(t, err)
+		noErr(t, err)
 
 		for _, iface := range ifaces {
 			if iface.Flags&net.FlagLoopback == 0 {
 				continue
 			}
 			addrs, err := iface.Addrs()
-			require.NoError(t, err)
+			noErr(t, err)
 
 			for _, addr := range addrs {
 				ipaddr := addr.(*net.IPNet)
@@ -1635,7 +1634,7 @@ func TestMemberlist_Join_IPv6(t *testing.T) {
 	c1.Logger = testLogger(t, c1.Name)
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1650,7 +1649,7 @@ func TestMemberlist_Join_IPv6(t *testing.T) {
 	c2.Logger = testLogger(t, c2.Name)
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1658,8 +1657,8 @@ func TestMemberlist_Join_IPv6(t *testing.T) {
 	}()
 
 	num, err := m2.Join([]string{fmt.Sprintf("%s/%s:%d", m1.config.Name, m1.config.BindAddr, m1.config.BindPort)})
-	require.NoError(t, err)
-	require.Equal(t, 1, num)
+	noErr(t, err)
+	equal(t, 1, num)
 
 	// Check the hosts. m1 merges after replying, so it may lag Join.
 	if len(m2.Members()) != 2 {
@@ -1721,7 +1720,7 @@ func TestAdvertiseAddr(t *testing.T) {
 	c.AdvertisePort = advertisePort
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1731,10 +1730,10 @@ func TestAdvertiseAddr(t *testing.T) {
 	yield()
 
 	members := m.Members()
-	require.Equal(t, 1, len(members))
+	equal(t, 1, len(members))
 
-	require.Equal(t, advertiseAddr.String(), members[0].Addr.String())
-	require.Equal(t, advertisePort, int(members[0].Port))
+	equal(t, advertiseAddr.String(), members[0].Addr.String())
+	equal(t, advertisePort, int(members[0].Port))
 }
 
 type MockConflict struct {
@@ -1762,7 +1761,7 @@ func TestMemberlist_conflictDelegate(t *testing.T) {
 	c1.Conflict = mock
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1777,7 +1776,7 @@ func TestMemberlist_conflictDelegate(t *testing.T) {
 	c2.BindPort = bindPort
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1785,8 +1784,8 @@ func TestMemberlist_conflictDelegate(t *testing.T) {
 	}()
 
 	num, err := m1.Join([]string{c2.Name + "/" + c2.BindAddr})
-	require.NoError(t, err)
-	require.Equal(t, 1, num)
+	noErr(t, err)
+	equal(t, 1, num)
 
 	yield()
 
@@ -1847,7 +1846,7 @@ func TestMemberlist_PingDelegate(t *testing.T) {
 	c1 := newConfig()
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1862,7 +1861,7 @@ func TestMemberlist_PingDelegate(t *testing.T) {
 	mock := c2.Ping.(*MockPing)
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -1870,16 +1869,16 @@ func TestMemberlist_PingDelegate(t *testing.T) {
 	}()
 
 	num, err := m2.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
-	require.NoError(t, err)
-	require.Equal(t, 1, num)
+	noErr(t, err)
+	equal(t, 1, num)
 
 	waitUntilSize(t, m1, 2)
 	waitUntilSize(t, m2, 2)
 
 	time.Sleep(2 * c1.ProbeInterval)
 
-	require.NoError(t, m1.Shutdown())
-	require.NoError(t, m2.Shutdown())
+	noErr(t, m1.Shutdown())
+	noErr(t, m2.Shutdown())
 
 	mOther, mRTT, mPayload := mock.getContents()
 
@@ -2008,7 +2007,7 @@ func TestMemberlist_EncryptedGossipTransition(t *testing.T) {
 			conf.BindPort = bindPort
 		}
 		m, err := Create(conf)
-		require.NoError(t, err)
+		noErr(t, err)
 
 		if bindPort == 0 {
 			bindPort = m.config.BindPort
@@ -2023,17 +2022,17 @@ func TestMemberlist_EncryptedGossipTransition(t *testing.T) {
 		t.Logf("Node %s[%s] joining node %s[%s]", srcName, src.config.Name, dstName, dst.config.Name)
 
 		num, err := src.Join([]string{dst.config.Name + "/" + dst.config.BindAddr})
-		require.NoError(t, err)
-		require.Equal(t, 1, num)
+		noErr(t, err)
+		equal(t, 1, num)
 
 		waitUntilSize(t, src, numNodes)
 		waitUntilSize(t, dst, numNodes)
 
 		// Check the hosts
-		require.Equal(t, numNodes, len(src.Members()), "nodes: %v", src.Members())
-		require.Equal(t, numNodes, src.estNumNodes(), "nodes: %v", src.Members())
-		require.Equal(t, numNodes, len(dst.Members()), "nodes: %v", dst.Members())
-		require.Equal(t, numNodes, dst.estNumNodes(), "nodes: %v", dst.Members())
+		equal(t, numNodes, len(src.Members()), "nodes: %v", src.Members())
+		equal(t, numNodes, src.estNumNodes(), "nodes: %v", src.Members())
+		equal(t, numNodes, len(dst.Members()), "nodes: %v", dst.Members())
+		equal(t, numNodes, dst.estNumNodes(), "nodes: %v", dst.Members())
 	}
 
 	leaveOK := func(m *Memberlist, why string) {
@@ -2042,7 +2041,7 @@ func TestMemberlist_EncryptedGossipTransition(t *testing.T) {
 		name := pretty[m.config.Name]
 		t.Logf("Node %s[%s] is leaving %s", name, m.config.Name, why)
 		err := m.Leave(time.Second)
-		require.NoError(t, err)
+		noErr(t, err)
 	}
 
 	shutdownOK := func(m *Memberlist, why string) {
@@ -2051,7 +2050,7 @@ func TestMemberlist_EncryptedGossipTransition(t *testing.T) {
 		name := pretty[m.config.Name]
 		t.Logf("Node %s[%s] is shutting down %s", name, m.config.Name, why)
 		err := m.Shutdown()
-		require.NoError(t, err)
+		noErr(t, err)
 
 		// Double check that it genuinely shutdown.
 		waitUntilPortIsFree(t, m)
@@ -2329,7 +2328,7 @@ func TestMemberlist_Members_SnapshotNoRace(t *testing.T) {
 	c := testConfig(t)
 	c.Delegate = d
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() { _ = m.Shutdown() }()
 
 	stop := make(chan struct{})
@@ -2350,7 +2349,7 @@ func TestMemberlist_Members_SnapshotNoRace(t *testing.T) {
 
 	for i := range 100 {
 		d.setMeta([]byte{byte(i)})
-		require.NoError(t, m.UpdateNode(time.Second))
+		noErr(t, m.UpdateNode(time.Second))
 	}
 	close(stop)
 	wg.Wait()

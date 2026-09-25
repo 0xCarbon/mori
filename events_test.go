@@ -7,8 +7,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/require"
 )
 
 // recordingEventDelegate appends (kind, name, meta) tuples in delivery order.
@@ -90,7 +88,7 @@ func waitEvents(t *testing.T, d *recordingEventDelegate, want int) []string {
 func TestEvents_DeliveryOrderIsCommitOrder(t *testing.T) {
 	d := &recordingEventDelegate{}
 	m := GetMemberlist(t, func(c *Config) { c.Events = d })
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	alivePeer(m, "a", 2, 1, nil)
@@ -100,7 +98,7 @@ func TestEvents_DeliveryOrderIsCommitOrder(t *testing.T) {
 	alivePeer(m, "c", 4, 1, nil)
 
 	got := waitEvents(t, d, 6)
-	require.Equal(t,
+	equal(t,
 		[]string{"join:" + m.config.Name, "join:a", "join:b", "update:a", "leave:a", "join:c"},
 		got[:6])
 }
@@ -111,7 +109,7 @@ func TestEvents_DeliveryOrderIsCommitOrder(t *testing.T) {
 func TestEvents_PerNodeOrderUnderConcurrentMutators(t *testing.T) {
 	d := &recordingEventDelegate{}
 	m := GetMemberlist(t, func(c *Config) { c.Events = d })
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	const nodes = 8
@@ -135,7 +133,7 @@ func TestEvents_PerNodeOrderUnderConcurrentMutators(t *testing.T) {
 	}
 	for i := range nodes {
 		name := fmt.Sprintf("n%d", i)
-		require.Equal(t, []string{"join", "update", "leave"}, perNode[name],
+		equal(t, []string{"join", "update", "leave"}, perNode[name],
 			"per-node order violated for %s", name)
 	}
 }
@@ -145,7 +143,7 @@ func TestEvents_PerNodeOrderUnderConcurrentMutators(t *testing.T) {
 func TestEvents_BlockingConsumerDoesNotStallProtocol(t *testing.T) {
 	d := newGateEventDelegate()
 	m := GetMemberlist(t, func(c *Config) { c.Events = d })
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 	defer close(d.release)
 
@@ -175,7 +173,7 @@ func TestEvents_BlockingConsumerDoesNotStallProtocol(t *testing.T) {
 func TestEvents_LeaveBarrierBoundedAndRetryable(t *testing.T) {
 	d := newGateEventDelegate()
 	m := GetMemberlist(t, func(c *Config) { c.Events = d })
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	<-d.entered // block the dispatcher on the self-join delivery
@@ -183,20 +181,20 @@ func TestEvents_LeaveBarrierBoundedAndRetryable(t *testing.T) {
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel1()
 	err := m.LeaveContext(ctx1)
-	require.Error(t, err)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.True(t, m.hasLeft(), "leave must be committed despite unconfirmed delivery")
+	isErr(t, err)
+	errIs(t, err, context.DeadlineExceeded)
+	isTrue(t, m.hasLeft(), "leave must be committed despite unconfirmed delivery")
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel2()
 	err = m.LeaveContext(ctx2)
-	require.Error(t, err, "retry against a still-blocked consumer must also time out")
-	require.ErrorIs(t, err, context.DeadlineExceeded)
+	isErr(t, err, "retry against a still-blocked consumer must also time out")
+	errIs(t, err, context.DeadlineExceeded)
 
 	close(d.release)
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel3()
-	require.NoError(t, m.LeaveContext(ctx3), "retry after release confirms via the persisted receipt")
+	noErr(t, m.LeaveContext(ctx3), "retry after release confirms via the persisted receipt")
 }
 
 // leaveFromJoinDelegate calls LeaveContext from inside NotifyJoin.
@@ -224,16 +222,16 @@ func TestEvents_ReentrantLeaveFromCallback(t *testing.T) {
 	m := GetMemberlist(t, func(c *Config) { c.Events = d })
 	d.m = m
 	d.self = m.config.Name
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	select {
 	case err := <-d.done:
-		require.NoError(t, err, "re-entrant LeaveContext must succeed without deadlock")
+		noErr(t, err, "re-entrant LeaveContext must succeed without deadlock")
 	case <-time.After(5 * time.Second):
 		t.Fatal("LeaveContext from a callback deadlocked")
 	}
-	require.True(t, m.hasLeft())
+	isTrue(t, m.hasLeft())
 }
 
 // TestEvents_SnapshotsAreImmutable: delivered events carry private deep
@@ -242,7 +240,7 @@ func TestEvents_ReentrantLeaveFromCallback(t *testing.T) {
 func TestEvents_SnapshotsAreImmutable(t *testing.T) {
 	d := &recordingEventDelegate{}
 	m := GetMemberlist(t, func(c *Config) { c.Events = d })
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	meta := []byte("aaaa")
@@ -253,13 +251,13 @@ func TestEvents_SnapshotsAreImmutable(t *testing.T) {
 	alivePeer(m, "p", 2, 2, []byte("bbbb"))
 
 	got := waitEvents(t, d, 3) // self-join, join:p, update:p
-	require.Equal(t, "join:p", got[1])
+	equal(t, "join:p", got[1])
 	d.mu.Lock()
 	joinMeta := string(d.metas[1])
 	updateMeta := string(d.metas[2])
 	d.mu.Unlock()
-	require.Equal(t, "aaaa", joinMeta, "queued snapshot must not alias caller/nodeMap memory")
-	require.Equal(t, "bbbb", updateMeta)
+	equal(t, "aaaa", joinMeta, "queued snapshot must not alias caller/nodeMap memory")
+	equal(t, "bbbb", updateMeta)
 }
 
 // TestEvents_WakeStress: an enqueue storm with a fast consumer loses no
@@ -267,7 +265,7 @@ func TestEvents_SnapshotsAreImmutable(t *testing.T) {
 func TestEvents_WakeStress(t *testing.T) {
 	d := &recordingEventDelegate{}
 	m := GetMemberlist(t, func(c *Config) { c.Events = d })
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	const updates = 5000
@@ -276,7 +274,7 @@ func TestEvents_WakeStress(t *testing.T) {
 	}
 	// self-join + join:p + (updates-1) meta updates
 	got := waitEvents(t, d, 1+updates)
-	require.Len(t, got, 1+updates)
+	hasLen(t, got, 1+updates)
 }
 
 // TestEvents_PendingIncludesInFlight: with the consumer blocked on the
@@ -284,7 +282,7 @@ func TestEvents_WakeStress(t *testing.T) {
 func TestEvents_PendingIncludesInFlight(t *testing.T) {
 	d := newGateEventDelegate()
 	m := GetMemberlist(t, func(c *Config) { c.Events = d })
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	<-d.entered // dispatcher blocked delivering self-join (in flight)
@@ -296,8 +294,8 @@ func TestEvents_PendingIncludesInFlight(t *testing.T) {
 	pending := m.eventPending
 	queued := len(m.events)
 	m.eventMu.Unlock()
-	require.Equal(t, 3, pending, "pending must include the in-flight event")
-	require.Equal(t, 2, queued)
+	equal(t, 3, pending, "pending must include the in-flight event")
+	equal(t, 2, queued)
 
 	close(d.release)
 	deadline := time.Now().Add(5 * time.Second)
@@ -323,12 +321,12 @@ func TestEvents_CreateDeliversSelfJoinBeforeReturn(t *testing.T) {
 	c.Events = d
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() { _ = m.Shutdown() }()
 
 	got := d.snapshot()
-	require.NotEmpty(t, got, "NotifyJoin(self) must be delivered before Create returns")
-	require.Equal(t, "join:"+c.Name, got[0])
+	notEmpty(t, got, "NotifyJoin(self) must be delivered before Create returns")
+	equal(t, "join:"+c.Name, got[0])
 }
 
 // TestEvents_ShutdownDrainsQueue: Shutdown seals admission, drains every
@@ -337,7 +335,7 @@ func TestEvents_CreateDeliversSelfJoinBeforeReturn(t *testing.T) {
 func TestEvents_ShutdownDrainsQueue(t *testing.T) {
 	d := newGateEventDelegate()
 	m := GetMemberlist(t, func(c *Config) { c.Events = d })
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 
 	<-d.entered
 	alivePeer(m, "p1", 2, 1, nil)
@@ -347,29 +345,29 @@ func TestEvents_ShutdownDrainsQueue(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 		close(d.release)
 	}()
-	require.NoError(t, m.Shutdown())
+	noErr(t, m.Shutdown())
 
 	got := d.snapshot()
-	require.Len(t, got, 3, "all committed events must be delivered before Shutdown returns: %v", got)
+	hasLen(t, got, 3, "all committed events must be delivered before Shutdown returns: %v", got)
 
 	m.eventMu.Lock()
 	sealed, pending := m.eventsSealed, m.eventPending
 	m.eventMu.Unlock()
-	require.True(t, sealed)
-	require.Zero(t, pending)
+	isTrue(t, sealed)
+	isZero(t, pending)
 }
 
 // TestEvents_UnattachedReceipts: with no EventDelegate configured, the
 // lifecycle barriers are trivially satisfied — no waiting, no hang.
 func TestEvents_UnattachedReceipts(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 	defer func() { _ = m.Shutdown() }()
 
 	start := time.Now()
-	require.NoError(t, m.UpdateNodeContext(context.Background()))
-	require.NoError(t, m.LeaveContext(context.Background()))
+	noErr(t, m.UpdateNodeContext(context.Background()))
+	noErr(t, m.LeaveContext(context.Background()))
 	// And the idempotent retry with no receipt-bearing event:
-	require.NoError(t, m.LeaveContext(context.Background()))
-	require.Less(t, time.Since(start), 2*time.Second)
+	noErr(t, m.LeaveContext(context.Background()))
+	less(t, time.Since(start), 2*time.Second)
 }

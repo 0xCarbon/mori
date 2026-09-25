@@ -7,8 +7,6 @@ import (
 	"math/rand/v2"
 	"slices"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 )
 
 // for testing only
@@ -176,18 +174,18 @@ func TestTransmitLimited_GetBroadcasts(t *testing.T) {
 
 	// 2 byte overhead per message, should get all 4 messages
 	all := q.GetBroadcasts(2, 80)
-	require.Equal(t, 4, len(all), "missing messages: %v", prettyPrintMessages(all))
+	equal(t, 4, len(all), "missing messages: %v", prettyPrintMessages(all))
 
 	// 3 byte overhead, should only get 3 messages back
 	partial := q.GetBroadcasts(3, 80)
-	require.Equal(t, 3, len(partial), "missing messages: %v", prettyPrintMessages(partial))
+	equal(t, 3, len(partial), "missing messages: %v", prettyPrintMessages(partial))
 }
 
 func TestTransmitLimited_GetBroadcasts_Limit(t *testing.T) {
 	q := &TransmitLimitedQueue{RetransmitMult: 1, NumNodes: func() int { return 10 }}
 
-	require.Equal(t, int64(0), q.idGen, "the id generator seed starts at zero")
-	require.Equal(t, 2, retransmitLimit(q.RetransmitMult, q.NumNodes()), "sanity check transmit limits")
+	equal(t, int64(0), q.idGen, "the id generator seed starts at zero")
+	equal(t, 2, retransmitLimit(q.RetransmitMult, q.NumNodes()), "sanity check transmit limits")
 
 	// 18 bytes per message
 	q.QueueBroadcast(&memberlistBroadcast{"test", []byte("1. this is a test."), nil})
@@ -195,30 +193,30 @@ func TestTransmitLimited_GetBroadcasts_Limit(t *testing.T) {
 	q.QueueBroadcast(&memberlistBroadcast{"bar", []byte("3. this is a test."), nil})
 	q.QueueBroadcast(&memberlistBroadcast{"baz", []byte("4. this is a test."), nil})
 
-	require.Equal(t, int64(4), q.idGen, "we handed out 4 IDs")
+	equal(t, int64(4), q.idGen, "we handed out 4 IDs")
 
 	// 3 byte overhead, should only get 3 messages back
 	partial1 := q.GetBroadcasts(3, 80)
-	require.Equal(t, 3, len(partial1), "missing messages: %v", prettyPrintMessages(partial1))
+	equal(t, 3, len(partial1), "missing messages: %v", prettyPrintMessages(partial1))
 
-	require.Equal(t, int64(4), q.idGen, "id generator never rewinds")
+	equal(t, int64(4), q.idGen, "id generator never rewinds")
 
 	partial2 := q.GetBroadcasts(3, 80)
-	require.Equal(t, 3, len(partial2), "missing messages: %v", prettyPrintMessages(partial2))
+	equal(t, 3, len(partial2), "missing messages: %v", prettyPrintMessages(partial2))
 
-	require.Equal(t, int64(4), q.idGen, "id generator never rewinds")
+	equal(t, int64(4), q.idGen, "id generator never rewinds")
 
 	// Only two not expired
 	partial3 := q.GetBroadcasts(3, 80)
-	require.Equal(t, 2, len(partial3), "missing messages: %v", prettyPrintMessages(partial3))
+	equal(t, 2, len(partial3), "missing messages: %v", prettyPrintMessages(partial3))
 
-	require.Equal(t, int64(4), q.idGen, "id generator never rewinds, even when the queue empties")
+	equal(t, int64(4), q.idGen, "id generator never rewinds, even when the queue empties")
 
 	// Should get nothing
 	partial5 := q.GetBroadcasts(3, 80)
-	require.Equal(t, 0, len(partial5), "missing messages: %v", prettyPrintMessages(partial5))
+	equal(t, 0, len(partial5), "missing messages: %v", prettyPrintMessages(partial5))
 
-	require.Equal(t, int64(4), q.idGen, "id generator never rewinds, even when the queue empties")
+	equal(t, int64(4), q.idGen, "id generator never rewinds, even when the queue empties")
 }
 
 func prettyPrintMessages(msgs [][]byte) []string {
@@ -244,7 +242,7 @@ func TestTransmitLimited_Prune(t *testing.T) {
 	// Keep only 2
 	q.Prune(2)
 
-	require.Equal(t, 2, q.NumQueued())
+	equal(t, 2, q.NumQueued())
 
 	// Should notify the first two
 	select {

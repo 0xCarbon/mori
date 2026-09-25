@@ -8,9 +8,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/require"
-	"go.uber.org/goleak"
 )
 
 // blockingTransport is a Transport whose packet writes block until released,
@@ -69,7 +66,7 @@ func TestShutdown_JoinsInFlightScheduleCallbacks(t *testing.T) {
 	c.PushPullInterval = 0
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 
 	// Give gossip a target so it enters the hung write.
 	peer := alive{
@@ -85,7 +82,7 @@ func TestShutdown_JoinsInFlightScheduleCallbacks(t *testing.T) {
 	for bt.inFlight.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	require.Positive(t, bt.inFlight.Load(), "no schedule callback entered the transport")
+	positive(t, bt.inFlight.Load(), "no schedule callback entered the transport")
 
 	// Release the hung writes shortly after Shutdown starts waiting.
 	go func() {
@@ -93,15 +90,15 @@ func TestShutdown_JoinsInFlightScheduleCallbacks(t *testing.T) {
 		close(bt.release)
 	}()
 
-	require.NoError(t, m.Shutdown())
-	require.Zero(t, bt.inFlight.Load(),
+	noErr(t, m.Shutdown())
+	isZero(t, bt.inFlight.Load(),
 		"Shutdown returned while a schedule callback was still inside the transport")
 }
 
 // TestCreateShutdown_NoGoroutineLeak: acceptance from issue #3 — a tight
 // Create → Shutdown loop leaves zero goroutines behind.
 func TestCreateShutdown_NoGoroutineLeak(t *testing.T) {
-	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	defer verifyNoGoroutineLeak(t)()
 
 	for range 10 {
 		c := testConfig(t)
@@ -110,20 +107,20 @@ func TestCreateShutdown_NoGoroutineLeak(t *testing.T) {
 		c.PushPullInterval = time.Millisecond
 
 		m, err := Create(c)
-		require.NoError(t, err)
-		require.NoError(t, m.Shutdown())
+		noErr(t, err)
+		noErr(t, m.Shutdown())
 	}
 }
 
 // TestCreateJoinShutdown_NoGoroutineLeak: the full acceptance loop with a
 // real join between two nodes over loopback.
 func TestCreateJoinShutdown_NoGoroutineLeak(t *testing.T) {
-	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	defer verifyNoGoroutineLeak(t)()
 
 	c1 := testConfig(t)
 	c1.GossipInterval = time.Millisecond
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 
 	for range 5 {
 		c2 := testConfig(t)
@@ -131,16 +128,16 @@ func TestCreateJoinShutdown_NoGoroutineLeak(t *testing.T) {
 		c2.BindPort = m1.config.BindPort
 
 		m2, err := Create(c2)
-		require.NoError(t, err)
+		noErr(t, err)
 
 		n, err := m2.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
-		require.NoError(t, err)
-		require.Equal(t, 1, n)
+		noErr(t, err)
+		equal(t, 1, n)
 
-		require.NoError(t, m2.Shutdown())
+		noErr(t, m2.Shutdown())
 	}
 
-	require.NoError(t, m1.Shutdown())
+	noErr(t, m1.Shutdown())
 }
 
 // TestShutdown_PushPullOnlySchedule: with probe and gossip disabled but
@@ -154,14 +151,14 @@ func TestShutdown_PushPullOnlySchedule(t *testing.T) {
 	c.PushPullInterval = time.Second
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 
 	done := make(chan error, 1)
 	go func() { done <- m.Shutdown() }()
 
 	select {
 	case err := <-done:
-		require.NoError(t, err)
+		noErr(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Shutdown wedged: pushPullTrigger was registered but never stopped")
 	}
@@ -198,7 +195,7 @@ func TestShutdown_FromDelegateCallback_NoSelfJoinDeadlock(t *testing.T) {
 	c1.Events = d
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	d.m = m1
 	defer func() { _ = m1.Shutdown() }()
 
@@ -208,15 +205,15 @@ func TestShutdown_FromDelegateCallback_NoSelfJoinDeadlock(t *testing.T) {
 	c2.GossipInterval = time.Millisecond
 	c2.BindPort = m1.config.BindPort
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() { _ = m2.Shutdown() }()
 
 	_, err = m2.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
-	require.NoError(t, err)
+	noErr(t, err)
 
 	select {
 	case err := <-d.done:
-		require.NoError(t, err, "re-entrant Shutdown from callback must succeed")
+		noErr(t, err, "re-entrant Shutdown from callback must succeed")
 	case <-time.After(10 * time.Second):
 		t.Fatal("Shutdown called from a delegate callback deadlocked (self-join)")
 	}
@@ -230,7 +227,7 @@ func TestShutdown_FromDelegateCallback_NoSelfJoinDeadlock(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	require.True(t, m1.hasShutdown())
+	isTrue(t, m1.hasShutdown())
 }
 
 // shutdownOnLeaveDelegate calls Shutdown from NotifyLeave — which runs on
@@ -255,7 +252,7 @@ func TestShutdown_FromUntrackedCallbackHoldingNodeLock(t *testing.T) {
 	d := &shutdownOnLeaveDelegate{done: make(chan error, 1)}
 
 	m := GetMemberlist(t, func(c *Config) { c.Events = d })
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 	d.m = m
 	defer func() { _ = m.Shutdown() }()
 
@@ -268,7 +265,7 @@ func TestShutdown_FromUntrackedCallbackHoldingNodeLock(t *testing.T) {
 
 	select {
 	case err := <-d.done:
-		require.NoError(t, err, "Shutdown from NotifyLeave must not fail")
+		noErr(t, err, "Shutdown from NotifyLeave must not fail")
 	case <-time.After(5 * time.Second):
 		t.Fatal("Shutdown from an untracked callback holding nodeLock deadlocked")
 	}
@@ -293,7 +290,7 @@ func TestShutdown_ReentrantFirst_QuiescesAsynchronously(t *testing.T) {
 		// clear the timer armed below.
 		c.ProbeInterval = time.Second
 	})
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 	d.m = m
 
 	// Arm a suspicion timer for a peer: tracked goroutines self-remove on
@@ -312,7 +309,7 @@ func TestShutdown_ReentrantFirst_QuiescesAsynchronously(t *testing.T) {
 	m.nodeLock.RLock()
 	armed := len(m.nodeTimers)
 	m.nodeLock.RUnlock()
-	require.Equal(t, 1, armed, "suspicion timer must be armed before the leave")
+	equal(t, 1, armed, "suspicion timer must be armed before the leave")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -320,7 +317,7 @@ func TestShutdown_ReentrantFirst_QuiescesAsynchronously(t *testing.T) {
 
 	select {
 	case err := <-d.done:
-		require.NoError(t, err)
+		noErr(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("in-callback Shutdown did not return")
 	}
@@ -338,12 +335,12 @@ func TestShutdown_ReentrantFirst_QuiescesAsynchronously(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	require.Zero(t, timers, "reaper did not clear suspicion timers after re-entrant-first Shutdown")
+	isZero(t, timers, "reaper did not clear suspicion timers after re-entrant-first Shutdown")
 
 	m.trackedMu.Lock()
 	tracked := len(m.trackedGoids)
 	m.trackedMu.Unlock()
-	require.Zero(t, tracked, "tracked goroutines survived quiescence")
+	isZero(t, tracked, "tracked goroutines survived quiescence")
 }
 
 // panicRecoverDelegate panics in the AliveDelegate gate; the caller
@@ -363,7 +360,7 @@ func TestShutdown_AfterRecoveredCallbackPanic_JoinsSynchronously(t *testing.T) {
 	m := GetMemberlist(t, func(c *Config) {
 		c.Alive = panicRecoverDelegate{}
 	})
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 
 	// A remote-origin alive runs the Alive gate on THIS goroutine, inside
 	// runCallback; it panics and we recover.
@@ -374,19 +371,19 @@ func TestShutdown_AfterRecoveredCallbackPanic_JoinsSynchronously(t *testing.T) {
 		Port:        7946,
 		Vsn:         m.config.BuildVsnArray(),
 	}
-	require.Panics(t, func() { m.aliveNode(&peer, false) })
+	panics(t, func() { m.aliveNode(&peer, false) })
 
 	// The marker must have been released by the deferred unmark.
-	require.False(t, m.inReentrantContext(),
+	isFalse(t, m.inReentrantContext(),
 		"recovered callback panic leaked the callback-context marker")
 
 	// And Shutdown on this goroutine must take the synchronous path: after
 	// it returns, every tracked goroutine is already gone.
-	require.NoError(t, m.Shutdown())
+	noErr(t, m.Shutdown())
 	m.trackedMu.Lock()
 	tracked := len(m.trackedGoids)
 	m.trackedMu.Unlock()
-	require.Zero(t, tracked, "synchronous Shutdown returned before quiescence")
+	isZero(t, tracked, "synchronous Shutdown returned before quiescence")
 }
 
 // TestShutdown_ConcurrentFromTrackedGoroutine: a tracked goroutine calling
@@ -404,7 +401,7 @@ func TestShutdown_ConcurrentFromTrackedGoroutine(t *testing.T) {
 	c.PushPullInterval = 0
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 
 	peer := alive{
 		Incarnation: 1,
@@ -419,7 +416,7 @@ func TestShutdown_ConcurrentFromTrackedGoroutine(t *testing.T) {
 	for bt.inFlight.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	require.Positive(t, bt.inFlight.Load())
+	positive(t, bt.inFlight.Load())
 
 	// Outer Shutdown will block joining the gossip goroutine stuck in the
 	// hung WriteTo until release fires.
@@ -440,13 +437,13 @@ func TestShutdown_ConcurrentFromTrackedGoroutine(t *testing.T) {
 
 	select {
 	case err := <-inner:
-		require.NoError(t, err)
+		noErr(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("tracked-goroutine Shutdown deadlocked against the outer join")
 	}
 	select {
 	case err := <-outer:
-		require.NoError(t, err)
+		noErr(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("outer Shutdown never completed")
 	}
@@ -457,7 +454,7 @@ func TestShutdown_ConcurrentFromTrackedGoroutine(t *testing.T) {
 // timers that would outlive the instance.
 func TestSuspectNode_AfterShutdown_DoesNotArmTimer(t *testing.T) {
 	m := GetMemberlist(t, nil)
-	require.NoError(t, m.setAlive(nil))
+	noErr(t, m.setAlive(nil))
 
 	peer := alive{
 		Incarnation: 1,
@@ -468,7 +465,7 @@ func TestSuspectNode_AfterShutdown_DoesNotArmTimer(t *testing.T) {
 	}
 	m.aliveNode(&peer, false)
 
-	require.NoError(t, m.Shutdown())
+	noErr(t, m.Shutdown())
 
 	s := suspect{Incarnation: 1, Node: "peer", From: m.config.Name}
 	m.suspectNode(&s)
@@ -476,7 +473,7 @@ func TestSuspectNode_AfterShutdown_DoesNotArmTimer(t *testing.T) {
 	m.nodeLock.RLock()
 	armed := len(m.nodeTimers)
 	m.nodeLock.RUnlock()
-	require.Zero(t, armed, "suspicion timer armed on a shut-down instance")
+	isZero(t, armed, "suspicion timer armed on a shut-down instance")
 }
 
 // countingEventDelegate counts NotifyLeave calls.
@@ -503,7 +500,7 @@ func TestShutdown_StopsSuspicionTimers(t *testing.T) {
 	c.SuspicionMult = 1
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() { _ = m.Shutdown() }()
 
 	peer := alive{
@@ -523,17 +520,17 @@ func TestShutdown_StopsSuspicionTimers(t *testing.T) {
 	m.nodeLock.RLock()
 	armed := len(m.nodeTimers)
 	m.nodeLock.RUnlock()
-	require.Equal(t, 1, armed, "suspicion timer must be armed before shutdown")
+	equal(t, 1, armed, "suspicion timer must be armed before shutdown")
 
 	baseline := d.leaves.Load()
-	require.NoError(t, m.Shutdown())
+	noErr(t, m.Shutdown())
 
 	// Force the underlying timer window to elapse; a survivor would fire.
 	m.nodeLock.RLock()
 	remaining := len(m.nodeTimers)
 	m.nodeLock.RUnlock()
-	require.Zero(t, remaining, "suspicion timers must be cleared by Shutdown")
+	isZero(t, remaining, "suspicion timers must be cleared by Shutdown")
 	time.Sleep(50 * time.Millisecond)
-	require.Equal(t, baseline, d.leaves.Load(),
+	equal(t, baseline, d.leaves.Load(),
 		"suspicion timer fired after Shutdown")
 }

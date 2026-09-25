@@ -3,98 +3,53 @@
 
 // Command checkdeps enforces the dependency policy:
 //
-//   - Library packages (every package outside tools/) depend only on the
-//     standard library and on packages of this module.
-//   - Every requirement in go.mod (direct or indirect, including those
-//     only tests need) is an exception listed in the transition allowlist
-//     (project/deps-transition.txt). With module graph pruning, go.mod
-//     lists exactly the modules whose packages the module's packages and
-//     tests build. The allowlist is a ratchet: an entry that is no longer
-//     required fails the audit, so removing a dependency forces removing
-//     its entry, and the file ends empty. Replacements are refused.
-//   - Tools may only use golang.org/x/ and github.com/0xCarbon/ modules.
+//   - The root module (the library, its tests and the in-module tools)
+//     requires no module at all: its go.mod has no require line, and the
+//     import closure of every package, tests included, holds only the
+//     standard library and this module.
+//   - A tool that needs more lives in its own module under tools/; such a
+//     module may depend, transitively, only on golang.org/x/ and
+//     github.com/0xCarbon/ modules, without replacements.
 //   - No project-authored unsafe imports, assembly or object files.
 //
 // Frozen evidence under project/evidence/ (nested modules that pin the
-// codecs being compared) is not maintained source and is skipped.
+// implementations being compared) is not maintained source and is skipped.
 //
 // Usage: go run ./tools/checkdeps (from the repository root).
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 )
 
-// allowlistPath is the transition allowlist, relative to the root.
-const allowlistPath = "project/deps-transition.txt"
-
 // modFile is the subset of `go mod edit -json` the audit reads.
 type modFile struct {
+	Module  struct{ Path string }
 	Require []struct{ Path string }
 	Replace []struct{ Old, New struct{ Path string } }
 }
 
-// approvedForTools reports whether a tool may depend on path.
+// module is one entry of `go list -m -json all`.
+type module struct {
+	Path    string
+	Main    bool
+	Replace *module
+}
+
+// approvedForTools reports whether a tool module may depend on path.
 func approvedForTools(path string) bool {
 	return strings.HasPrefix(path, "golang.org/x/") || strings.HasPrefix(path, "github.com/0xCarbon/")
-}
-
-// readAllowlist parses "<module path> <reason...>" lines; '#' starts a
-// comment. A missing file is an empty allowlist.
-func readAllowlist(root string) (map[string]bool, error) {
-	f, err := os.Open(filepath.Join(root, allowlistPath))
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]bool{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	allowed := map[string]bool{}
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line, _, _ := strings.Cut(sc.Text(), "#")
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		if len(fields) < 2 {
-			return nil, fmt.Errorf("%s: entry %q needs a reason", allowlistPath, fields[0])
-		}
-		allowed[fields[0]] = true
-	}
-	return allowed, sc.Err()
-}
-
-// auditRequirements checks a `go mod edit -json` document. allowed holds
-// the transition exceptions; used collects every allowed module required.
-func auditRequirements(data []byte, allowed, used map[string]bool) error {
-	var mf modFile
-	if err := json.Unmarshal(data, &mf); err != nil {
-		return fmt.Errorf("go.mod: %w", err)
-	}
-	for _, r := range mf.Replace {
-		return fmt.Errorf("prohibited replacement for %s: %s", r.Old.Path, r.New.Path)
-	}
-	for _, r := range mf.Require {
-		if !allowed[r.Path] {
-			return fmt.Errorf("prohibited dependency %s", r.Path)
-		}
-		used[r.Path] = true
-	}
-	return nil
 }
 
 func goCmd(dir string, args ...string) ([]byte, error) {
@@ -110,60 +65,72 @@ func goCmd(dir string, args ...string) ([]byte, error) {
 	return out, nil
 }
 
-// auditPackages checks the non-test import closure of every package: a
-// library package may reach only the standard library, this module and
-// allowlisted modules; a tool may additionally reach approved modules.
-func auditPackages(root, modPath string, allowed, used map[string]bool) error {
+// auditRootRequirements refuses any require or replace in the root go.mod
+// and returns the module path.
+func auditRootRequirements(data []byte) (string, error) {
+	var mf modFile
+	if err := json.Unmarshal(data, &mf); err != nil {
+		return "", fmt.Errorf("go.mod: %w", err)
+	}
+	for _, r := range mf.Replace {
+		return "", fmt.Errorf("prohibited replacement for %s: %s", r.Old.Path, r.New.Path)
+	}
+	for _, r := range mf.Require {
+		return "", fmt.Errorf("prohibited dependency %s: the root module requires only the standard library", r.Path)
+	}
+	return mf.Module.Path, nil
+}
+
+// auditRootPackages checks that every package of the root module, tests
+// included, reaches only the standard library and this module.
+func auditRootPackages(root, modPath string) error {
 	out, err := goCmd(root, "list", "-deps", "-test", "-f", "{{if not .Standard}}{{.ImportPath}}|{{with .Module}}{{.Path}}{{end}}{{end}}", "./...")
 	if err != nil {
 		return err
-	}
-	// The closure of tool packages is audited separately so a tool-only
-	// dependency is not mistaken for a library one.
-	libOut, err := goCmd(root, "list", "-f", "{{.ImportPath}}", "./...")
-	if err != nil {
-		return err
-	}
-	var libs []string
-	for line := range strings.Lines(string(libOut)) {
-		p := strings.TrimSpace(line)
-		if p != "" && !strings.HasPrefix(p, modPath+"/tools/") {
-			libs = append(libs, p)
-		}
-	}
-	libDeps := map[string]bool{}
-	if len(libs) > 0 {
-		deps, err := goCmd(root, append([]string{"list", "-deps", "-test", "-f", "{{if not .Standard}}{{.ImportPath}}{{end}}"}, libs...)...)
-		if err != nil {
-			return err
-		}
-		for line := range strings.Lines(string(deps)) {
-			if p := strings.TrimSpace(line); p != "" {
-				libDeps[p] = true
-			}
-		}
 	}
 	for line := range strings.Lines(string(out)) {
 		pkg, mod, _ := strings.Cut(strings.TrimSpace(line), "|")
 		if pkg == "" || mod == modPath || (mod == "" && strings.HasSuffix(pkg, ".test")) {
 			continue // this module, or a synthesized test main
 		}
-		switch {
-		case allowed[mod]:
-			used[mod] = true
-		case libDeps[pkg]:
-			return fmt.Errorf("library package dependency %s (module %s) is not standard library", pkg, mod)
-		case !approvedForTools(mod):
-			return fmt.Errorf("tool dependency %s (module %s) is not golang.org/x or 0xCarbon", pkg, mod)
-		}
+		return fmt.Errorf("package dependency %s (module %s) is not standard library", pkg, mod)
 	}
 	return nil
 }
 
-// auditSources refuses unsafe imports and non-Go machine code in
-// maintained source.
-func auditSources(root string) error {
-	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+// auditToolGraph checks a `go list -m -json all` stream of a tool module.
+func auditToolGraph(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	count := 0
+	for {
+		var m module
+		if err := dec.Decode(&m); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return fmt.Errorf("module graph: %w", err)
+		}
+		count++
+		if m.Main {
+			continue
+		}
+		if m.Replace != nil {
+			return fmt.Errorf("prohibited replacement for %s: %s", m.Path, m.Replace.Path)
+		}
+		if !approvedForTools(m.Path) {
+			return fmt.Errorf("prohibited tool dependency %s", m.Path)
+		}
+	}
+	if count == 0 {
+		return errors.New("empty module graph")
+	}
+	return nil
+}
+
+// walk audits maintained sources and collects nested tool module
+// directories.
+func walk(root string) (toolModules []string, err error) {
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -171,8 +138,9 @@ func auditSources(root string) error {
 		if err != nil {
 			return err
 		}
+		slash := filepath.ToSlash(rel)
 		if d.IsDir() {
-			switch filepath.ToSlash(rel) {
+			switch slash {
 			case ".git", "project/evidence", "dist":
 				return filepath.SkipDir
 			}
@@ -180,65 +148,60 @@ func auditSources(root string) error {
 		}
 		switch filepath.Ext(d.Name()) {
 		case ".s", ".syso":
-			return fmt.Errorf("%s: assembly or object files are prohibited", filepath.ToSlash(rel))
+			return fmt.Errorf("%s: assembly or object files are prohibited", slash)
 		case ".go":
 			file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
 			if err != nil {
-				return fmt.Errorf("%s: parse imports: %w", filepath.ToSlash(rel), err)
+				return fmt.Errorf("%s: parse imports: %w", slash, err)
 			}
 			for _, spec := range file.Imports {
 				name, err := strconv.Unquote(spec.Path.Value)
 				if err != nil {
-					return fmt.Errorf("%s: import path: %w", filepath.ToSlash(rel), err)
+					return fmt.Errorf("%s: import path: %w", slash, err)
 				}
 				if name == "unsafe" {
-					return fmt.Errorf("%s: project-authored unsafe import prohibited", filepath.ToSlash(rel))
+					return fmt.Errorf("%s: project-authored unsafe import prohibited", slash)
 				}
 			}
 		}
+		if d.Name() == "go.mod" && slash != "go.mod" {
+			if !strings.HasPrefix(slash, "tools/") {
+				return fmt.Errorf("%s: nested modules are allowed only under tools/", slash)
+			}
+			toolModules = append(toolModules, filepath.Dir(path))
+		}
 		return nil
 	})
+	return toolModules, err
 }
 
 func audit(root string) error {
-	if err := auditSources(root); err != nil {
-		return err
-	}
-	allowed, err := readAllowlist(root)
+	toolModules, err := walk(root)
 	if err != nil {
 		return err
 	}
-	modOut, err := goCmd(root, "list", "-m")
+	edit, err := goCmd(root, "mod", "edit", "-json")
 	if err != nil {
 		return err
 	}
-	modPath := strings.TrimSpace(string(modOut))
-	requirements, err := goCmd(root, "mod", "edit", "-json")
+	modPath, err := auditRootRequirements(edit)
 	if err != nil {
 		return err
 	}
-	used := map[string]bool{}
-	if err := auditRequirements(requirements, allowed, used); err != nil {
+	if err := auditRootPackages(root, modPath); err != nil {
 		return err
 	}
-	if err := auditPackages(root, modPath, allowed, used); err != nil {
-		return err
-	}
-	var stale []string
-	for path := range allowed {
-		if !used[path] {
-			stale = append(stale, path)
+	for _, dir := range toolModules {
+		graph, err := goCmd(dir, "list", "-m", "-json", "all")
+		if err != nil {
+			return err
+		}
+		if err := auditToolGraph(graph); err != nil {
+			rel, _ := filepath.Rel(root, dir)
+			return fmt.Errorf("%s: %w", filepath.ToSlash(rel), err)
 		}
 	}
-	if len(stale) > 0 {
-		slices.Sort(stale)
-		return fmt.Errorf("%s lists modules that are no longer required; remove them: %s", allowlistPath, strings.Join(stale, ", "))
-	}
-	if len(allowed) > 0 {
-		fmt.Printf("check-deps: passed with %d transition exception(s) in %s\n", len(allowed), allowlistPath)
-		return nil
-	}
-	fmt.Println("check-deps: passed (standard library only)")
+	fmt.Printf("check-deps: passed (standard library only; %d tool module(s))\n", len(toolModules))
 	return nil
 }
 

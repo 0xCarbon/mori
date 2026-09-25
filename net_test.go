@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/0xCarbon/mori/internal/msgpack"
-	"github.com/stretchr/testify/require"
 )
 
 // As a regression we left this test very low-level and network-ey, even after
@@ -892,8 +891,8 @@ func TestIngestPacket_ExportedFunc_EmptyMessage(t *testing.T) {
 	}
 
 	err := m.transport.(ingestionAwareTransport).IngestPacket(emptyConn, udp.LocalAddr(), time.Now(), true)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "packet too short")
+	isErr(t, err)
+	contains(t, err.Error(), "packet too short")
 }
 
 type emptyReadNetConn struct {
@@ -914,7 +913,7 @@ func TestGossip_MismatchedKeys(t *testing.T) {
 	c1.SecretKey = []byte("4W6DGn2VQVqDEceOdmuRTQ==")
 
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -928,7 +927,7 @@ func TestGossip_MismatchedKeys(t *testing.T) {
 	c2.SecretKey = []byte("XhX/w702/JKKK7/7OtM9Ww==")
 
 	m2, err := Create(c2)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
@@ -964,7 +963,7 @@ func TestHandleCommand(t *testing.T) {
 		logger: logger,
 	}
 	m.handleCommand(nil, &net.TCPAddr{Port: 12345}, time.Now())
-	require.Contains(t, buf.String(), "missing message type byte")
+	contains(t, buf.String(), "missing message type byte")
 }
 
 func TestReadRemoteState_Limits(t *testing.T) {
@@ -989,16 +988,16 @@ func TestReadRemoteState_Limits(t *testing.T) {
 		buf := encode(pushPullMsg, msg)
 
 		conn, err := tr.DialTimeout(addr, time.Millisecond*100)
-		require.NoError(t, err)
+		noErr(t, err)
 
 		err = m.rawSendMsgStream(conn, buf, "")
-		require.NoError(t, err)
+		noErr(t, err)
 
 		// conn closed: get nothing back
 		var out []byte
 		_, err = conn.Read(out)
-		require.Error(t, err, "EOF")
-		require.Contains(t, logs.String(),
+		isErr(t, err, "EOF")
+		contains(t, logs.String(),
 			"number of nodes in header (10000000) exceeds limit")
 	})
 
@@ -1007,16 +1006,16 @@ func TestReadRemoteState_Limits(t *testing.T) {
 		buf := encode(pushPullMsg, msg)
 
 		conn, err := tr.DialTimeout(addr, time.Millisecond*100)
-		require.NoError(t, err)
+		noErr(t, err)
 
 		err = m.rawSendMsgStream(conn, buf, "")
-		require.NoError(t, err)
+		noErr(t, err)
 
 		// conn closed: get nothing back
 		var out []byte
 		_, err = conn.Read(out)
-		require.Error(t, err, "EOF")
-		require.Contains(t, logs.String(),
+		isErr(t, err, "EOF")
+		contains(t, logs.String(),
 			"user state length (30000000) exceeds limit")
 	})
 }

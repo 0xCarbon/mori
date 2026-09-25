@@ -10,8 +10,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestTransport_Join(t *testing.T) {
@@ -158,7 +156,7 @@ func TestTransport_Send(t *testing.T) {
 	}
 	// Some of these are UDP so often get re-ordered making the test flaky if we
 	// assert send ordering. Sort both slices to be tolerant of re-ordering.
-	require.ElementsMatch(t, expected, received)
+	elementsMatch(t, expected, received)
 }
 
 type testCountingWriter struct {
@@ -226,9 +224,9 @@ func TestTransport_TcpListenBackoff(t *testing.T) {
 	// We'll leave a little flex; the important thing here is the asymptotic behavior.
 	// If the minDelay or maxDelay in NetTransport#tcpListen() are modified, this test may fail
 	// and need to be adjusted.
-	require.True(t, numCalls > 8)
-	require.True(t, numCalls < 14)
+	isTrue(t, numCalls > 8)
+	isTrue(t, numCalls < 14)
 
 	// no connections should have been accepted and sent to the channel
-	require.Equal(t, len(transport.streamCh), 0)
+	equal(t, len(transport.streamCh), 0)
 }

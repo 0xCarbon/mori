@@ -6,8 +6,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/require"
 )
 
 // dialRecordingTransport records DialTimeout targets and blocks each dial
@@ -78,7 +76,7 @@ func TestPushPull_ConcurrencyOverlapsExchanges(t *testing.T) {
 	c.PushPullConcurrency = 2
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() { _ = m.Shutdown() }()
 
 	// Two alive peers to exchange with.
@@ -110,7 +108,7 @@ func TestPushPull_ConcurrencyOverlapsExchanges(t *testing.T) {
 	}
 
 	// Distinct peers were selected.
-	require.Len(t, seen, 2, "exchanges must target distinct peers")
+	hasLen(t, seen, 2, "exchanges must target distinct peers")
 
 	// Release the transport and the cycle must join both exchanges.
 	close(tr.release)
@@ -133,7 +131,7 @@ func TestPushPull_DefaultRemainsSinglePeer(t *testing.T) {
 	c.PushPullInterval = 0
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() { _ = m.Shutdown() }()
 
 	for i, name := range []string{"peer1", "peer2", "peer3"} {
@@ -184,7 +182,7 @@ func TestPushPull_FailureIsolation(t *testing.T) {
 	c.PushPullConcurrency = 3
 
 	m, err := Create(c)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() { _ = m.Shutdown() }()
 
 	for i, name := range []string{"peer1", "peer2", "peer3"} {
@@ -210,7 +208,7 @@ func TestPushPull_FailureIsolation(t *testing.T) {
 	tr.mu.Lock()
 	attempted := len(tr.dialTimes)
 	tr.mu.Unlock()
-	require.Equal(t, 3, attempted, "every selected peer must be attempted despite sibling failures")
+	equal(t, 3, attempted, "every selected peer must be attempted despite sibling failures")
 }
 
 // TestPushPull_ConcurrentE2EConvergence: sanity — a real 3-node cluster with
@@ -227,7 +225,7 @@ func TestPushPull_ConcurrentE2EConvergence(t *testing.T) {
 
 	c1 := newConfig()
 	m1, err := Create(c1)
-	require.NoError(t, err)
+	noErr(t, err)
 	defer func() { _ = m1.Shutdown() }()
 
 	others := make([]*Memberlist, 0, 2)
@@ -235,12 +233,12 @@ func TestPushPull_ConcurrentE2EConvergence(t *testing.T) {
 		c := newConfig()
 		c.BindPort = m1.config.BindPort
 		m, err := Create(c)
-		require.NoError(t, err)
+		noErr(t, err)
 		defer func() { _ = m.Shutdown() }()
 
 		n, err := m.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
-		require.NoError(t, err)
-		require.GreaterOrEqual(t, n, 1)
+		noErr(t, err)
+		greaterOrEqual(t, n, 1)
 		others = append(others, m)
 	}
 
