@@ -6,8 +6,10 @@ package mori
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"reflect"
 	"runtime"
@@ -1372,4 +1374,82 @@ func TestSendReliableRefusesOversizedMessages(t *testing.T) {
 	to := &Node{Name: "node2", Addr: net.ParseIP("127.0.0.2"), Port: 1}
 	err := m1.SendReliable(to, make([]byte, maxUserMsgBytes+1))
 	isErr(t, err, "an undeliverable stream user message was reported as sent")
+}
+
+// TestReadStreamAcceptsIncompressibleCompressedState: senders compress
+// stream messages whether or not that shrinks them, and LZW expands
+// incompressible data (about 1.37x, at most 1.5x). A push/pull whose
+// decompressed form is within maxDecompressedBytes must be accepted even
+// when its compressed form is larger than that.
+func TestReadStreamAcceptsIncompressibleCompressedState(t *testing.T) {
+	m := GetMemberlist(t, func(c *Config) { c.Transport = (&MockNetwork{}).NewTransport("node") })
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	// A large cluster: 20,000 nodes with 512 bytes of random meta and a
+	// full 20 MiB of random user state — about 31 MB decompressed.
+	r := rand.New(rand.NewPCG(1, 2))
+	random := func(n int) []byte {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte(r.Uint32())
+		}
+		return b
+	}
+	const nodes = 20_000
+	user := random(maxPushStateBytes)
+	state := pushPullHeader{Nodes: nodes, UserStateLen: len(user)}.AppendMsgpack([]byte{byte(pushPullMsg)})
+	for i := range nodes {
+		n := pushNodeState{Name: fmt.Sprint("node-", i), Addr: []byte{10, 1, byte(i >> 8), byte(i)}, Port: 7946, Meta: random(512), Incarnation: 1, Vsn: []uint8{1, 5, 2, 0, 0, 0}}
+		state = n.AppendMsgpack(state)
+	}
+	state = append(state, user...)
+	lessOrEqual(t, len(state), maxDecompressedBytes, "decompressed size")
+	compressed, err := compressPayload(state)
+	noErr(t, err)
+	if len(compressed) <= maxStreamMessageBytes {
+		t.Fatalf("test input compressed to %d bytes; it must exceed the %d-byte plaintext cap", len(compressed), maxStreamMessageBytes)
+	}
+
+	_, dec, err := m.readStream(streamFrom(t, compressed), "")
+	noErr(t, err, "compressed stream of %d bytes (%d decompressed)", len(compressed), len(state))
+	_, got, gotUser, err := m.readRemoteState(dec)
+	noErr(t, err)
+	equal(t, nodes, len(got))
+	isTrue(t, bytes.Equal(user, gotUser), "user state corrupted")
+}
+
+// TestReadStreamOversizedDeclaredFields covers issue #21: a stream whose
+// compressed buffer or node field declares a huge length, but carries few
+// bytes, is refused without allocating the declared size.
+func TestReadStreamOversizedDeclaredFields(t *testing.T) {
+	m := GetMemberlist(t, func(c *Config) { c.Transport = (&MockNetwork{}).NewTransport("node") })
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	str32 := func(b []byte, n uint32) []byte {
+		return binary.BigEndian.AppendUint32(append(b, 0xdb), n)
+	}
+	compressedBuf := []byte{byte(compressMsg), 0x82, 0xa4, 'A', 'l', 'g', 'o', 0x00, 0xa3, 'B', 'u', 'f'}
+	compressedBuf = append(str32(compressedBuf, 0xffff_fff0), make([]byte, 1024)...)
+
+	nodeMeta := pushPullHeader{Nodes: 1}.AppendMsgpack([]byte{byte(pushPullMsg)})
+	nodeMeta = append(nodeMeta, 0x82, 0xa4, 'N', 'a', 'm', 'e', 0xa1, 'p', 0xa4, 'M', 'e', 't', 'a')
+	nodeMeta = append(str32(nodeMeta, 0xffff_fff0), make([]byte, 1024)...)
+
+	for name, stream := range map[string][]byte{"compress.Buf": compressedBuf, "pushNodeState.Meta": nodeMeta} {
+		t.Run(name, func(t *testing.T) {
+			var readErr error
+			alloc := allocatedBytes(func() {
+				msgType, dec, err := m.readStream(streamFrom(t, stream), "")
+				if err != nil {
+					readErr = err
+					return
+				}
+				if msgType == pushPullMsg {
+					_, _, _, readErr = m.readRemoteState(dec)
+				}
+			})
+			isErr(t, readErr)
+			lessOrEqual(t, alloc, uint64(4<<20), "allocation for a %d-byte stream", len(stream))
+		})
+	}
 }

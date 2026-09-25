@@ -2255,3 +2255,19 @@ func TestReadNameservers(t *testing.T) {
 		t.Fatal("missing resolv.conf was not an error")
 	}
 }
+
+// TestLocalNodeStateAfterLeave covers issue #16: LocalNode reports the
+// local node's real state, including StateLeft after Leave (it used to
+// report StateAlive forever, shadowed by an internal field).
+func TestLocalNodeStateAfterLeave(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := newSimNet()
+		m1 := simCreate(t, n, 1, nil)
+		m2 := simCreate(t, n, 2, nil)
+		_, err := m1.Join([]string{m2.config.Name + "/" + m2.config.BindAddr})
+		noErr(t, err)
+		equal(t, StateAlive, m1.LocalNode().State)
+		noErr(t, m1.Leave(time.Second))
+		equal(t, StateLeft, m1.LocalNode().State)
+	})
+}

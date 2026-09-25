@@ -184,7 +184,8 @@ cross builds, the dependency audit (`tools/checkdeps`), `go mod tidy -diff`,
 the test suite, the race detector and a benchmark smoke. The suite runs in
 about five seconds: timer-driven protocol tests use `testing/synctest` on an
 in-memory network (`simnet_test.go`) and assert exact timings. See
-[AGENTS.md](AGENTS.md) for the contribution rules.
+[CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for the
+contribution rules.
 
 ## License
 

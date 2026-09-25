@@ -2,11 +2,25 @@
 
 ### Improvements
 
+* `CONTRIBUTING.md` and an updated pull request template (adapted from
+  upstream hashicorp/memberlist #375).
+
 ### Changes
 
 ### Fixed
 
+* A compressed stream message is read against the largest valid compressed
+  form of a `maxDecompressedBytes` message (LZW can expand incompressible
+  input up to 1.5x), not the 40 MiB plaintext cap. Senders compress stream
+  messages whether or not that shrinks them, so v0.8.0 refused legitimate
+  push/pull states between about 29 and 40 MiB with incompressible
+  content. Plaintext stream messages keep the 40 MiB cap.
+
 ### Security
+
+* Regression tests for issue #21: a stream whose compressed buffer or node
+  field declares a multi-gigabyte length but carries a few bytes is refused
+  without allocating the declared size.
 
 ## v0.8.0 (Mori)
 
