@@ -152,7 +152,7 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
 
 ## Status
 
-All waves done. The branch is ready for owner review; nothing is pushed.
+All waves done. Merged as PR #22 and released as v0.8.0 (2026-09-25).
 Open items for the owner (outside this repository):
 - taba: replace `mlCfg.LogOutput = io.Discard` with
   `mlCfg.Logger = slog.New(slog.DiscardHandler)` (and the test override),

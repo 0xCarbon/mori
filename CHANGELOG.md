@@ -1,6 +1,16 @@
 ## Unreleased
 
-This release (the v0.8.0 candidate) makes Mori a standard-library-only
+### Improvements
+
+### Changes
+
+### Fixed
+
+### Security
+
+## v0.8.0 (Mori)
+
+This release makes Mori a standard-library-only
 module, ports the upstream security fixes released after the fork point and
 closes further instances of the same classes, replaces go-msgpack with an
 owned and fuzzed codec proven byte-compatible (a v0.7 and a v0.8 node can
