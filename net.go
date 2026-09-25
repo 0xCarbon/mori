@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -86,8 +87,24 @@ const (
 	userMsgOverhead        = 1
 	blockingWarning        = 10 * time.Millisecond // Warn if a UDP packet takes this long to process
 	maxPushStateBytes      = 20 * 1024 * 1024
-	maxPushStateNodes      = 1024 * 1024 // Each requires conservatively  ~20 bytes when encoded
-	maxPushPullRequests    = 128         // Maximum number of concurrent push/pull requests
+	maxPushStateNodes      = 1024 * 1024      // Each requires conservatively  ~20 bytes when encoded
+	maxUserMsgBytes        = 20 * 1024 * 1024 // Largest stream user message buffered off the wire
+	maxPushPullRequests    = 128              // Maximum number of concurrent push/pull requests
+	pushStatePrealloc      = 1024             // Node states preallocated before any is decoded
+
+	// maxDecompressedBytes bounds a decompressed stream message: user state
+	// plus an equal budget for the encoded node states.
+	maxDecompressedBytes = 2 * maxPushStateBytes
+
+	// maxPacketDecompressedBytes bounds a decompressed packet. Senders
+	// compress packets built within the packet budget (at most one UDP
+	// payload), so this leaves a wide margin while capping the expansion a
+	// single unauthenticated datagram can force.
+	maxPacketDecompressedBytes = 1 << 20
+
+	// maxStreamMessageBytes bounds the plaintext bytes read for one stream
+	// message (type byte, headers, node states and user payload).
+	maxStreamMessageBytes = maxDecompressedBytes
 )
 
 // ping request sent directly to node
@@ -428,7 +445,22 @@ func (m *Memberlist) ingestPacket(buf []byte, from net.Addr, timestamp time.Time
 	}
 }
 
+// envelope records which wrapping message types enclose a packet part.
+// Senders compress at most once and never nest compound messages, so a
+// repeated envelope is malformed; refusing it bounds the decompression work
+// and recursion depth a single packet can cause.
+type envelope uint8
+
+const (
+	inCompound envelope = 1 << iota
+	inCompress
+)
+
 func (m *Memberlist) handleCommand(buf []byte, from net.Addr, timestamp time.Time) {
+	m.handleCommandIn(buf, from, timestamp, 0)
+}
+
+func (m *Memberlist) handleCommandIn(buf []byte, from net.Addr, timestamp time.Time, env envelope) {
 	if len(buf) < 1 {
 		m.logger.Printf("[ERR] memberlist: missing message type byte %s", LogAddress(from))
 		return
@@ -440,9 +472,17 @@ func (m *Memberlist) handleCommand(buf []byte, from net.Addr, timestamp time.Tim
 	// Switch on the msgType
 	switch msgType {
 	case compoundMsg:
-		m.handleCompound(buf, from, timestamp)
+		if env&inCompound != 0 {
+			m.logger.Printf("[ERR] memberlist: nested compound message %s", LogAddress(from))
+			return
+		}
+		m.handleCompound(buf, from, timestamp, env|inCompound)
 	case compressMsg:
-		m.handleCompressed(buf, from, timestamp)
+		if env&inCompress != 0 {
+			m.logger.Printf("[ERR] memberlist: nested compressed message %s", LogAddress(from))
+			return
+		}
+		m.handleCompressed(buf, from, timestamp, env|inCompress)
 
 	case pingMsg:
 		m.handlePing(buf, from)
@@ -539,7 +579,7 @@ func (m *Memberlist) packetHandler() {
 	}
 }
 
-func (m *Memberlist) handleCompound(buf []byte, from net.Addr, timestamp time.Time) {
+func (m *Memberlist) handleCompound(buf []byte, from net.Addr, timestamp time.Time, env envelope) {
 	// Decode the parts
 	trunc, parts, err := decodeCompoundMessage(buf)
 	if err != nil {
@@ -554,7 +594,7 @@ func (m *Memberlist) handleCompound(buf []byte, from net.Addr, timestamp time.Ti
 
 	// Handle each message
 	for _, part := range parts {
-		m.handleCommand(part, from, timestamp)
+		m.handleCommandIn(part, from, timestamp, env)
 	}
 }
 
@@ -769,7 +809,7 @@ func (m *Memberlist) handleUser(buf []byte, _ net.Addr) {
 }
 
 // handleCompressed is used to unpack a compressed message
-func (m *Memberlist) handleCompressed(buf []byte, from net.Addr, timestamp time.Time) {
+func (m *Memberlist) handleCompressed(buf []byte, from net.Addr, timestamp time.Time, env envelope) {
 	// Try to decode the payload
 	payload, err := decompressPayload(buf)
 	if err != nil {
@@ -778,7 +818,7 @@ func (m *Memberlist) handleCompressed(buf []byte, from net.Addr, timestamp time.
 	}
 
 	// Recursively handle the payload
-	m.handleCommand(payload, from, timestamp)
+	m.handleCommandIn(payload, from, timestamp, env)
 }
 
 // encodeAndSendMsg is used to combine the encoding and sending steps
@@ -1170,8 +1210,11 @@ func (m *Memberlist) decryptRemoteState(bufConn io.Reader, streamLabel string) (
 // The provided streamLabel if present will be authenticated during decryption
 // of each message.
 func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType, io.Reader, *codec.Decoder, error) {
-	// Created a buffered reader
-	var bufConn io.Reader = bufio.NewReader(conn)
+	// Created a buffered reader. Every stream message is bounded: encrypted
+	// and compressed payloads carry their own limits, and this caps the
+	// plaintext form, whose size is otherwise only implied by the headers
+	// and the variable-length fields inside it.
+	var bufConn io.Reader = bufio.NewReader(io.LimitReader(conn, maxStreamMessageBytes))
 
 	// Read the message type
 	buf := [1]byte{0}
@@ -1190,6 +1233,9 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 		plain, err := m.decryptRemoteState(bufConn, streamLabel)
 		if err != nil {
 			return 0, nil, nil, err
+		}
+		if len(plain) == 0 {
+			return 0, nil, nil, errors.New("decrypted message is empty")
 		}
 
 		// Reset message type and bufConn
@@ -1210,9 +1256,12 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 		if err := dec.Decode(&c); err != nil {
 			return 0, nil, nil, err
 		}
-		decomp, err := decompressBuffer(&c)
+		decomp, err := decompressBuffer(&c, maxDecompressedBytes)
 		if err != nil {
 			return 0, nil, nil, err
+		}
+		if len(decomp) == 0 {
+			return 0, nil, nil, errors.New("decompressed message is empty")
 		}
 
 		// Reset the message type
@@ -1239,19 +1288,20 @@ func (m *Memberlist) readRemoteState(bufConn io.Reader, dec *codec.Decoder) (boo
 	if header.Nodes < 0 || header.Nodes > maxPushStateNodes {
 		return false, nil, nil, fmt.Errorf("number of nodes in header (%d) exceeds limit", header.Nodes)
 	}
-
-	// Allocate space for the transfer
-	remoteNodes := make([]pushNodeState, header.Nodes)
-
-	// Try to decode all the states
-	for i := 0; i < header.Nodes; i++ {
-		if err := dec.Decode(&remoteNodes[i]); err != nil {
-			return false, nil, nil, err
-		}
-	}
-
 	if header.UserStateLen < 0 || header.UserStateLen > maxPushStateBytes {
 		return false, nil, nil, fmt.Errorf("user state length (%d) exceeds limit", header.UserStateLen)
+	}
+
+	// Decode the states. Storage grows with the states actually received,
+	// never from the declared count: a short header must not buy a large
+	// allocation.
+	remoteNodes := make([]pushNodeState, 0, min(header.Nodes, pushStatePrealloc))
+	for range header.Nodes {
+		var n pushNodeState
+		if err := dec.Decode(&n); err != nil {
+			return false, nil, nil, err
+		}
+		remoteNodes = append(remoteNodes, n)
 	}
 
 	// Read the remote user state into a buffer
@@ -1300,13 +1350,10 @@ func (m *Memberlist) mergeRemoteState(join bool, remoteNodes []pushNodeState, us
 				Port:  n.Port,
 				Meta:  n.Meta,
 				State: n.State,
-				PMin:  n.Vsn[0],
-				PMax:  n.Vsn[1],
-				PCur:  n.Vsn[2],
-				DMin:  n.Vsn[3],
-				DMax:  n.Vsn[4],
-				DCur:  n.Vsn[5],
 			}
+			// verifyProtocol refused malformed vectors above.
+			vsn, _ := parseVsn(n.Vsn)
+			nodes[idx].setVersions(vsn)
 		}
 		var err error
 		m.runCallback(func() { err = m.config.Merge.NotifyMerge(nodes) })
@@ -1349,6 +1396,10 @@ func (m *Memberlist) readUserMsg(bufConn io.Reader, dec *codec.Decoder) error {
 	var header userMsgHeader
 	if err := dec.Decode(&header); err != nil {
 		return err
+	}
+
+	if header.UserMsgLen < 0 || header.UserMsgLen > maxUserMsgBytes {
+		return fmt.Errorf("user message length (%d) exceeds limit", header.UserMsgLen)
 	}
 
 	// Read the user message into a buffer

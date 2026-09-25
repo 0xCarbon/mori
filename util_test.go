@@ -420,3 +420,39 @@ func TestCompressDecompressPayload(t *testing.T) {
 		t.Fatalf("bad payload: %v", decomp)
 	}
 }
+
+// TestDecompressBufferLimit covers upstream hashicorp/memberlist#363: a small
+// compressed message must not expand without bound. Streams accept up to
+// maxDecompressedBytes; packets, which senders build within the packet
+// budget, accept far less.
+func TestDecompressBufferLimit(t *testing.T) {
+	compressed := func(n int) *compress {
+		buf, err := compressPayload(make([]byte, n), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var c compress
+		if err := decode(buf.Bytes()[1:], &c); err != nil {
+			t.Fatal(err)
+		}
+		return &c
+	}
+
+	if _, err := decompressBuffer(compressed(maxDecompressedBytes+1), maxDecompressedBytes); err == nil {
+		t.Fatal("stream payload above maxDecompressedBytes was accepted")
+	}
+	if out, err := decompressBuffer(compressed(maxPushStateBytes+1), maxDecompressedBytes); err != nil || len(out) != maxPushStateBytes+1 {
+		t.Fatalf("stream payload within the limit: len %d, err %v", len(out), err)
+	}
+
+	bomb, err := compressPayload(make([]byte, maxPacketDecompressedBytes+1), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bomb.Bytes()) > 65507 {
+		t.Fatalf("test bomb does not fit one UDP payload: %d bytes", len(bomb.Bytes()))
+	}
+	if _, err := decompressPayload(bomb.Bytes()[1:]); err == nil {
+		t.Fatal("packet payload above maxPacketDecompressedBytes was accepted")
+	}
+}

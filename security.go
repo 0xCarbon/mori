@@ -8,6 +8,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -45,15 +46,18 @@ func pkcs7encode(buf *bytes.Buffer, ignore, blockSize int) {
 	}
 }
 
-// pkcs7decode is used to decode a buffer that has been padded
-func pkcs7decode(buf []byte, _ int) []byte {
+// pkcs7decode removes PKCS7 padding. The pad length must be between 1 and
+// blockSize and fit the buffer; the padded bytes are authenticated by GCM,
+// so a malformed pad means a misbehaving key holder, not line noise.
+func pkcs7decode(buf []byte, blockSize int) ([]byte, error) {
 	if len(buf) == 0 {
-		panic("Cannot decode a PKCS7 buffer of zero length")
+		return nil, errors.New("cannot decode a PKCS7 buffer of zero length")
 	}
-	n := len(buf)
-	last := buf[n-1]
-	n -= int(last)
-	return buf[:n]
+	pad := int(buf[len(buf)-1])
+	if pad < 1 || pad > blockSize || pad > len(buf) {
+		return nil, fmt.Errorf("invalid PKCS7 padding length %d", pad)
+	}
+	return buf[:len(buf)-pad], nil
 }
 
 // encryptOverhead returns the maximum possible overhead of encryption by version
@@ -191,10 +195,9 @@ func decryptPayload(keys [][]byte, msg []byte, data []byte) ([]byte, error) {
 		if err == nil {
 			// Remove the PKCS7 padding for vsn 0
 			if vsn == 0 {
-				return pkcs7decode(plain, aes.BlockSize), nil
-			} else {
-				return plain, nil
+				return pkcs7decode(plain, aes.BlockSize)
 			}
+			return plain, nil
 		}
 	}
 

@@ -5,6 +5,8 @@ package mori
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"reflect"
 	"testing"
 )
@@ -25,7 +27,10 @@ func TestPKCS7(t *testing.T) {
 		pkcs7encode(inp, 0, 16)
 
 		// Unpad
-		dec := pkcs7decode(inp.Bytes(), 16)
+		dec, err := pkcs7decode(inp.Bytes(), 16)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// Ensure equivilence
 		if !reflect.DeepEqual(buf, dec) {
@@ -69,5 +74,46 @@ func encryptDecryptVersioned(vsn encryptionVersion, t *testing.T) {
 		t.Errorf("len %d %v", len(msg), msg)
 		t.Errorf("len %d %v", len(plaintext), plaintext)
 		t.Fatalf("encrypt/decrypt failed! %d '%s' '%s'", cmp, msg, plaintext)
+	}
+}
+
+// TestDecryptPayloadRejectsInvalidPadding: version-0 payloads are PKCS7
+// padded inside the authenticated ciphertext. A key holder that seals a
+// malformed pad (zero, or longer than the plaintext) must get an error, not
+// a slice-bounds panic on the receiver.
+func TestDecryptPayloadRejectsInvalidPadding(t *testing.T) {
+	key := []byte("0123456789abcdef")
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Plaintexts are at least one block long so they pass the size check
+	// and reach the padding decoder.
+	padded := func(n int, last byte) []byte {
+		b := make([]byte, n)
+		b[n-1] = last
+		return b
+	}
+	for _, plain := range [][]byte{padded(16, 0xff), padded(16, 0), padded(32, 33)} {
+		nonce := make([]byte, nonceSize)
+		msg := append([]byte{0}, nonce...)
+		msg = gcm.Seal(msg, nonce, plain, nil)
+
+		var decErr error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("decryptPayload(%x) panicked: %v", plain, r)
+				}
+			}()
+			_, decErr = decryptPayload([][]byte{key}, msg, nil)
+		}()
+		if decErr == nil {
+			t.Fatalf("decryptPayload accepted invalid PKCS7 padding %x", plain)
+		}
 	}
 }

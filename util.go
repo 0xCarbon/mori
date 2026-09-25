@@ -303,12 +303,13 @@ func decompressPayload(msg []byte) ([]byte, error) {
 	if err := decode(msg, &c); err != nil {
 		return nil, err
 	}
-	return decompressBuffer(&c)
+	return decompressBuffer(&c, maxPacketDecompressedBytes)
 }
 
 // decompressBuffer is used to decompress the buffer of
-// a single compress message, handling multiple algorithms
-func decompressBuffer(c *compress) ([]byte, error) {
+// a single compress message, handling multiple algorithms. The output may
+// not exceed limit bytes.
+func decompressBuffer(c *compress, limit int) ([]byte, error) {
 	// Verify the algorithm
 	if c.Algo != lzwAlgo {
 		return nil, fmt.Errorf("cannot decompress unknown algorithm %d", c.Algo)
@@ -320,11 +321,15 @@ func decompressBuffer(c *compress) ([]byte, error) {
 		_ = uncomp.Close()
 	}()
 
-	// Read all the data
+	// Read at most one byte past the limit, so an oversized payload is
+	// detected without being materialized.
 	var b bytes.Buffer
-	_, err := io.Copy(&b, uncomp)
-	if err != nil {
+	n, err := io.CopyN(&b, uncomp, int64(limit)+1)
+	if err != nil && err != io.EOF {
 		return nil, err
+	}
+	if n > int64(limit) {
+		return nil, fmt.Errorf("decompressed message is larger than limit (%d)", limit)
 	}
 
 	// Return the uncompressed bytes

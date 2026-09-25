@@ -15,6 +15,38 @@
 
 ### Security
 
+Ports the four upstream hashicorp/memberlist fixes released after the fork
+point, and closes further instances of the same classes found while
+porting them. Every item is reachable by an unauthenticated peer unless
+noted; each has a regression test that failed (wrong error, allocation or
+panic) before the fix.
+
+* Stream user messages whose header declares a negative length or more
+  than 20 MiB are refused before any buffer is sized (upstream #361).
+* Decompression is bounded: stream payloads may expand to at most 40 MiB
+  (upstream #363) and packet payloads to at most 1 MiB, since senders only
+  compress packets built within the packet budget.
+* A compressed or encrypted stream whose inner payload is empty is an error
+  instead of an index-out-of-range panic (upstream #369; the decrypted form
+  requires a key holder).
+* Protocol version vectors (`Vsn`) with 1–5 entries are refused on the
+  alive, push/pull merge and protocol-verification paths instead of
+  panicking (upstream #368). Empty vectors keep their legacy meaning (all
+  versions zero); entries past the sixth are ignored.
+* A push/pull header no longer preallocates storage for every declared node:
+  a 10-byte header declaring 1,048,576 nodes used to allocate ~117 MB per
+  connection before a single node was read. Both header limits are now
+  checked before decoding, and storage grows with the states received.
+* Unencrypted, uncompressed stream messages are capped at 40 MiB of
+  plaintext; before, variable-length fields (for example node meta) made a
+  single push/pull unbounded.
+* A compressed message nested in a compressed message, or a compound
+  message nested in a compound message, is refused. Senders never produce
+  either; accepting them multiplied decompression work and recursion depth
+  per packet.
+* Version-0 (PKCS7-padded) encrypted payloads with an invalid pad length
+  return an error instead of a slice-bounds panic (requires a key holder).
+
 ## v0.7.0 (Mori)
 
 This release hardens the node lifecycle, shutdown, and delegate-event

@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -590,7 +591,7 @@ func TestTCPPushPull(t *testing.T) {
 		if err := dec.Decode(&c); err != nil {
 			t.Fatalf("unexpected err %s", err)
 		}
-		decomp, err := decompressBuffer(&c)
+		decomp, err := decompressBuffer(&c, maxDecompressedBytes)
 		if err != nil {
 			t.Fatalf("unexpected err %s", err)
 		}
@@ -1123,4 +1124,247 @@ func (c *errorReadNetConn) Read(b []byte) (n int, err error) {
 func (c *errorReadNetConn) Close() error {
 	close(c.closed)
 	return nil
+}
+
+// allocatedBytes reports the bytes allocated by the whole process while f
+// runs. Used to prove that header-declared lengths do not drive allocation.
+func allocatedBytes(f func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// streamFrom returns the reading end of an in-memory stream that carries
+// payload and then EOF.
+func streamFrom(t *testing.T, payload []byte) net.Conn {
+	t.Helper()
+	r, w := net.Pipe()
+	go func() {
+		_, _ = w.Write(payload)
+		_ = w.Close()
+	}()
+	t.Cleanup(func() { _ = r.Close() })
+	return r
+}
+
+// noPanic runs f and fails the test if it panics, so a crash on hostile
+// input is reported as a test failure with the panic value.
+func noPanic(t *testing.T, what string, f func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("%s panicked: %v", what, r)
+		}
+	}()
+	f()
+}
+
+// TestReadUserMsgLengthBounds covers upstream hashicorp/memberlist#361: a
+// stream user message whose header declares a huge or negative length must
+// be refused before any buffer is sized from the header.
+func TestReadUserMsgLengthBounds(t *testing.T) {
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Transport = (&MockNetwork{}).NewTransport("node")
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	for _, length := range []int{30_000_000, -1} {
+		t.Run(strconv.Itoa(length), func(t *testing.T) {
+			buf, err := encode(userMsg, &userMsgHeader{UserMsgLen: length}, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var readErr error
+			alloc := allocatedBytes(func() {
+				conn := streamFrom(t, append(buf.Bytes(), 1, 2, 3))
+				msgType, bufConn, dec, err := m.readStream(conn, "")
+				if err != nil {
+					t.Fatalf("readStream: %v", err)
+				}
+				if msgType != userMsg {
+					t.Fatalf("message type %d, want %d", msgType, userMsg)
+				}
+				readErr = m.readUserMsg(bufConn, dec)
+			})
+			if readErr == nil || !strings.Contains(readErr.Error(), "exceeds limit") {
+				t.Fatalf("readUserMsg error = %v, want a length-limit refusal", readErr)
+			}
+			if alloc > 4<<20 {
+				t.Fatalf("refusal allocated %d bytes; the header length must not size a buffer", alloc)
+			}
+		})
+	}
+}
+
+// TestReadRemoteStateNodeCountDoesNotPreallocate: a push/pull header that
+// declares the maximum node count but carries no node payload must not make
+// the receiver allocate storage for every declared node up front.
+func TestReadRemoteStateNodeCountDoesNotPreallocate(t *testing.T) {
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Transport = (&MockNetwork{}).NewTransport("node")
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	buf, err := encode(pushPullMsg, &pushPullHeader{Nodes: maxPushStateNodes}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var readErr error
+	alloc := allocatedBytes(func() {
+		conn := streamFrom(t, buf.Bytes())
+		_, bufConn, dec, err := m.readStream(conn, "")
+		if err != nil {
+			t.Fatalf("readStream: %v", err)
+		}
+		_, _, _, readErr = m.readRemoteState(bufConn, dec)
+	})
+	if readErr == nil {
+		t.Fatal("truncated push/pull state was accepted")
+	}
+	if alloc > 8<<20 {
+		t.Fatalf("truncated state allocated %d bytes for %d declared nodes", alloc, maxPushStateNodes)
+	}
+}
+
+// TestReadStreamEmptyInnerPayload covers upstream hashicorp/memberlist#369
+// and the equivalent decryption path: a compressed or encrypted stream whose
+// inner payload is empty must be an error, never an index panic.
+func TestReadStreamEmptyInnerPayload(t *testing.T) {
+	t.Run("compressed", func(t *testing.T) {
+		m := GetMemberlist(t, func(c *Config) {
+			c.Transport = (&MockNetwork{}).NewTransport("node")
+		})
+		t.Cleanup(func() { _ = m.Shutdown() })
+
+		buf, err := compressPayload(nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var readErr error
+		noPanic(t, "readStream", func() {
+			_, _, _, readErr = m.readStream(streamFrom(t, buf.Bytes()), "")
+		})
+		if readErr == nil {
+			t.Fatal("empty decompressed stream payload was accepted")
+		}
+	})
+
+	t.Run("encrypted", func(t *testing.T) {
+		key := []byte("0123456789abcdef")
+		m := GetMemberlist(t, func(c *Config) {
+			c.Transport = (&MockNetwork{}).NewTransport("node")
+			c.SecretKey = key
+		})
+		t.Cleanup(func() { _ = m.Shutdown() })
+
+		stream, err := m.encryptLocalState(nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var readErr error
+		noPanic(t, "readStream", func() {
+			_, _, _, readErr = m.readStream(streamFrom(t, stream), "")
+		})
+		if readErr == nil {
+			t.Fatal("empty decrypted stream payload was accepted")
+		}
+	})
+}
+
+// TestHandleCommandRejectsNestedEnvelopes: senders never nest a compressed
+// message in a compressed message, or a compound message in a compound
+// message. Accepting either lets one packet multiply decompression work and
+// recursion depth, so both are refused and nothing inside is queued.
+func TestHandleCommandRejectsNestedEnvelopes(t *testing.T) {
+	m := GetMemberlist(t, func(c *Config) {
+		c.Transport = (&MockNetwork{}).NewTransport("node")
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+	// Stop the packet handler from draining the queues under test.
+	_ = m.Shutdown()
+
+	user := []byte{byte(userMsg), 'h', 'i'}
+	compress := func(b []byte) []byte {
+		out, err := compressPayload(b, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out.Bytes()
+	}
+	compound := func(b []byte) []byte { return makeCompoundMessage([][]byte{b}).Bytes() }
+
+	cases := map[string][]byte{
+		"compress-in-compress": compress(compress(user)),
+		"compound-in-compound": compound(compound(user)),
+	}
+	for name, packet := range cases {
+		t.Run(name, func(t *testing.T) {
+			m.msgQueueLock.Lock()
+			m.lowPriorityMsgQueue.Init()
+			m.msgQueueLock.Unlock()
+
+			m.handleCommand(packet, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}, time.Now())
+
+			m.msgQueueLock.Lock()
+			queued := m.lowPriorityMsgQueue.Len()
+			m.msgQueueLock.Unlock()
+			if queued != 0 {
+				t.Fatalf("nested envelope delivered %d message(s); want refusal", queued)
+			}
+		})
+	}
+
+	t.Run("single-envelopes-still-accepted", func(t *testing.T) {
+		for _, packet := range [][]byte{compress(user), compound(user), compress(compound(user))} {
+			m.msgQueueLock.Lock()
+			m.lowPriorityMsgQueue.Init()
+			m.msgQueueLock.Unlock()
+
+			m.handleCommand(packet, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}, time.Now())
+
+			m.msgQueueLock.Lock()
+			queued := m.lowPriorityMsgQueue.Len()
+			m.msgQueueLock.Unlock()
+			if queued != 1 {
+				t.Fatalf("well-formed envelope queued %d messages, want 1", queued)
+			}
+		}
+	})
+}
+
+// TestReadStreamBoundsPlainMessage: an unencrypted, uncompressed stream has
+// no length prefix, so variable-length fields inside node states could make
+// one push/pull arbitrarily large. The plaintext read is capped at
+// maxStreamMessageBytes like the compressed form.
+func TestReadStreamBoundsPlainMessage(t *testing.T) {
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Transport = (&MockNetwork{}).NewTransport("node")
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	var stream bytes.Buffer
+	stream.WriteByte(byte(pushPullMsg))
+	hd := codec.MsgpackHandle{}
+	enc := codec.NewEncoder(&stream, &hd)
+	if err := enc.Encode(&pushPullHeader{Nodes: 1}); err != nil {
+		t.Fatal(err)
+	}
+	huge := pushNodeState{Name: "peer", Addr: []byte{127, 0, 0, 2}, Port: 7946, Meta: make([]byte, maxStreamMessageBytes), Vsn: []uint8{1, 5, 2, 0, 0, 0}}
+	if err := enc.Encode(&huge); err != nil {
+		t.Fatal(err)
+	}
+
+	_, bufConn, dec, err := m.readStream(streamFrom(t, stream.Bytes()), "")
+	if err != nil {
+		t.Fatalf("readStream: %v", err)
+	}
+	if _, nodes, _, err := m.readRemoteState(bufConn, dec); err == nil {
+		t.Fatalf("stream message above maxStreamMessageBytes was accepted (%d nodes)", len(nodes))
+	}
 }

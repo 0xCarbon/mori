@@ -76,6 +76,17 @@ func (n *Node) String() string {
 	return n.Name
 }
 
+// versions returns the node's protocol version vector.
+func (n *Node) versions() [vsnLen]uint8 {
+	return [vsnLen]uint8{n.PMin, n.PMax, n.PCur, n.DMin, n.DMax, n.DCur}
+}
+
+// setVersions sets the node's protocol versions from a validated vector.
+func (n *Node) setVersions(vsn [vsnLen]uint8) {
+	n.PMin, n.PMax, n.PCur = vsn[0], vsn[1], vsn[2]
+	n.DMin, n.DMax, n.DCur = vsn[3], vsn[4], vsn[5]
+}
+
 // NodeState is used to manage our state view of another node
 type nodeState struct {
 	Node
@@ -98,6 +109,25 @@ func (n *nodeState) FullAddress() Address {
 
 func (n *nodeState) DeadOrLeft() bool {
 	return n.State == StateDead || n.State == StateLeft
+}
+
+// vsnLen is the number of entries in a protocol version vector: pmin,
+// pmax, pcur, dmin, dmax, dcur.
+const vsnLen = 6
+
+// parseVsn validates a protocol version vector received from the network.
+// Correct senders emit vsnLen entries; legacy protocol-0 senders emit none,
+// which means all-zero versions. A vector in between is malformed and must
+// be refused rather than indexed. Entries past vsnLen are ignored.
+func parseVsn(v []uint8) (vsn [vsnLen]uint8, ok bool) {
+	if len(v) == 0 {
+		return vsn, true
+	}
+	if len(v) < vsnLen {
+		return vsn, false
+	}
+	copy(vsn[:], v)
+	return vsn, true
 }
 
 // ackHandler is used to register handlers for incoming acks and nacks.
@@ -727,6 +757,11 @@ func (m *Memberlist) verifyProtocol(remote []pushNodeState) error {
 	mindmax = math.MaxUint8
 
 	for _, rn := range remote {
+		vsn, ok := parseVsn(rn.Vsn)
+		if !ok {
+			return fmt.Errorf("Node '%s' sent a malformed protocol version vector (%d entries)", rn.Name, len(rn.Vsn))
+		}
+
 		// If the node isn't alive, then skip it
 		if rn.State != StateAlive {
 			continue
@@ -738,21 +773,10 @@ func (m *Memberlist) verifyProtocol(remote []pushNodeState) error {
 			continue
 		}
 
-		if rn.Vsn[0] > maxpmin {
-			maxpmin = rn.Vsn[0]
-		}
-
-		if rn.Vsn[1] < minpmax {
-			minpmax = rn.Vsn[1]
-		}
-
-		if rn.Vsn[3] > maxdmin {
-			maxdmin = rn.Vsn[3]
-		}
-
-		if rn.Vsn[4] < mindmax {
-			mindmax = rn.Vsn[4]
-		}
+		maxpmin = max(maxpmin, vsn[0])
+		minpmax = min(minpmax, vsn[1])
+		maxdmin = max(maxdmin, vsn[3])
+		mindmax = min(mindmax, vsn[4])
 	}
 
 	for _, n := range m.nodes {
@@ -782,11 +806,9 @@ func (m *Memberlist) verifyProtocol(remote []pushNodeState) error {
 	// version that satisfies the whole cluster, we verify that every
 	// node in the cluster satisifies this.
 	for _, n := range remote {
-		var nPCur, nDCur uint8
-		if len(n.Vsn) > 0 {
-			nPCur = n.Vsn[2]
-			nDCur = n.Vsn[5]
-		}
+		// Validated by the first loop; an empty vector reads as zeros.
+		vsn, _ := parseVsn(n.Vsn)
+		nPCur, nDCur := vsn[2], vsn[5]
 
 		if nPCur < maxpmin || nPCur > minpmax {
 			return fmt.Errorf(
@@ -990,10 +1012,15 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 		return
 	}
 
-	if len(a.Vsn) >= 3 {
-		pMin := a.Vsn[0]
-		pMax := a.Vsn[1]
-		pCur := a.Vsn[2]
+	vsn, vsnOK := parseVsn(a.Vsn)
+	if !vsnOK {
+		m.logger.Printf("[WARN] memberlist: Ignoring an alive message for '%s' (%v:%d) because its protocol version vector is malformed (%d entries)", a.Node, net.IP(a.Addr), a.Port, len(a.Vsn))
+		return
+	}
+	hasVsn := len(a.Vsn) > 0
+
+	if hasVsn {
+		pMin, pMax, pCur := vsn[0], vsn[1], vsn[2]
 		if pMin == 0 || pMax == 0 || pMin > pMax {
 			m.logger.Printf("[WARN] memberlist: Ignoring an alive message for '%s' (%v:%d) because protocol version(s) are wrong: %d <= %d <= %d should be >0", a.Node, net.IP(a.Addr), a.Port, pMin, pCur, pMax)
 			return
@@ -1008,7 +1035,7 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 	// exists to filter REMOTE claims, and a blocking filter must not sit
 	// inside the lifecycle calls' ctx-bounded critical section.
 	if m.config.Alive != nil && !bootstrap {
-		if len(a.Vsn) < 6 {
+		if !hasVsn {
 			m.logger.Printf("[WARN] memberlist: ignoring alive message for '%s' (%v:%d) because Vsn is not present",
 				a.Node, net.IP(a.Addr), a.Port)
 			return
@@ -1018,13 +1045,8 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 			Addr: a.Addr,
 			Port: a.Port,
 			Meta: a.Meta,
-			PMin: a.Vsn[0],
-			PMax: a.Vsn[1],
-			PCur: a.Vsn[2],
-			DMin: a.Vsn[3],
-			DMax: a.Vsn[4],
-			DCur: a.Vsn[5],
 		}
+		node.setVersions(vsn)
 		var err error
 		m.runCallback(func() { err = m.config.Alive.NotifyAlive(node) })
 		if err != nil {
@@ -1052,13 +1074,8 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 			},
 			State: StateDead,
 		}
-		if len(a.Vsn) > 5 {
-			state.PMin = a.Vsn[0]
-			state.PMax = a.Vsn[1]
-			state.PCur = a.Vsn[2]
-			state.DMin = a.Vsn[3]
-			state.DMax = a.Vsn[4]
-			state.DCur = a.Vsn[5]
+		if hasVsn {
+			state.setVersions(vsn)
 		}
 
 		// Add to map
@@ -1134,10 +1151,7 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 	// If this is us we need to refute, otherwise re-broadcast
 	if !bootstrap && isLocalNode {
 		// Compute the version vector
-		versions := []uint8{
-			state.PMin, state.PMax, state.PCur,
-			state.DMin, state.DMax, state.DCur,
-		}
+		versions := state.versions()
 
 		// If the Incarnation is the same, we need special handling, since it
 		// possible for the following situation to happen:
@@ -1152,7 +1166,7 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 		//
 		if a.Incarnation == state.Incarnation &&
 			bytes.Equal(a.Meta, state.Meta) &&
-			bytes.Equal(a.Vsn, versions) {
+			hasVsn && vsn == versions {
 			return
 		}
 		m.refute(state, a.Incarnation)
@@ -1161,13 +1175,8 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 		m.encodeBroadcastNotify(a.Node, aliveMsg, a, notify)
 
 		// Update protocol versions if it arrived
-		if len(a.Vsn) > 0 {
-			state.PMin = a.Vsn[0]
-			state.PMax = a.Vsn[1]
-			state.PCur = a.Vsn[2]
-			state.DMin = a.Vsn[3]
-			state.DMax = a.Vsn[4]
-			state.DCur = a.Vsn[5]
+		if hasVsn {
+			state.setVersions(vsn)
 		}
 
 		// Update the state and incarnation number.

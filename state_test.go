@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	metrics "github.com/hashicorp/go-metrics/compat"
 	iretry "github.com/0xCarbon/mori/internal/retry"
+	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/stretchr/testify/require"
 )
 
@@ -2685,3 +2685,82 @@ func verifySampleExists(t *testing.T, name string, sink *metrics.InmemSink) {
 		t.Fatalf("%s sample not emmited", name)
 	}
 }
+
+// TestMalformedVsnFromWire covers upstream hashicorp/memberlist#368: the
+// protocol version vector arrives from the network, so a peer can send
+// fewer than the six entries every correct sender produces. Such a vector
+// must be refused on every path — never indexed out of range — while an
+// empty vector (legacy protocol-0 senders) keeps its old meaning.
+func TestMalformedVsnFromWire(t *testing.T) {
+	newM := func(t *testing.T) *Memberlist {
+		m := GetMemberlist(t, func(c *Config) {
+			c.Transport = (&MockNetwork{}).NewTransport("local")
+			c.Merge = acceptMerge{}
+		})
+		t.Cleanup(func() { _ = m.Shutdown() })
+		if err := m.setAlive(nil); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+
+	for n := 1; n < 6; n++ {
+		vsn := []uint8{1, 5, 2, 0, 0, 0}[:n]
+
+		t.Run(fmt.Sprintf("alive/len%d", n), func(t *testing.T) {
+			m := newM(t)
+			noPanic(t, "aliveNode", func() {
+				m.aliveNode(&alive{Incarnation: 1, Node: "peer", Addr: []byte{127, 0, 0, 2}, Port: 7946, Vsn: vsn}, false)
+			})
+			m.nodeLock.RLock()
+			_, admitted := m.nodeMap["peer"]
+			m.nodeLock.RUnlock()
+			if admitted {
+				t.Fatalf("alive message with a %d-entry Vsn was admitted", n)
+			}
+		})
+
+		t.Run(fmt.Sprintf("alive-update/len%d", n), func(t *testing.T) {
+			m := newM(t)
+			m.aliveNode(&alive{Incarnation: 1, Node: "peer", Addr: []byte{127, 0, 0, 2}, Port: 7946, Vsn: []uint8{1, 5, 2, 0, 0, 0}}, false)
+			noPanic(t, "aliveNode", func() {
+				m.aliveNode(&alive{Incarnation: 2, Node: "peer", Addr: []byte{127, 0, 0, 2}, Port: 7946, Vsn: vsn}, false)
+			})
+			m.nodeLock.RLock()
+			inc := m.nodeMap["peer"].Incarnation
+			m.nodeLock.RUnlock()
+			if inc != 1 {
+				t.Fatalf("alive update with a %d-entry Vsn was applied (incarnation %d)", n, inc)
+			}
+		})
+
+		for _, state := range []NodeStateType{StateAlive, StateSuspect} {
+			t.Run(fmt.Sprintf("push-pull/%s/len%d", state.metricsString(), n), func(t *testing.T) {
+				m := newM(t)
+				remote := []pushNodeState{{Name: "peer", Addr: []byte{127, 0, 0, 2}, Port: 7946, State: state, Vsn: vsn}}
+				var err error
+				noPanic(t, "mergeRemoteState", func() { err = m.mergeRemoteState(true, remote, nil) })
+				if err == nil {
+					t.Fatalf("push/pull state with a %d-entry Vsn was merged", n)
+				}
+			})
+		}
+	}
+
+	t.Run("empty-vsn-is-legacy-zero", func(t *testing.T) {
+		m := newM(t)
+		m.aliveNode(&alive{Incarnation: 1, Node: "legacy", Addr: []byte{127, 0, 0, 3}, Port: 7946}, false)
+		m.nodeLock.RLock()
+		n, ok := m.nodeMap["legacy"]
+		m.nodeLock.RUnlock()
+		if !ok || n.PMin != 0 || n.PMax != 0 {
+			t.Fatalf("empty Vsn: admitted=%v node=%+v, want admitted with zero versions", ok, n)
+		}
+	})
+}
+
+// acceptMerge is a MergeDelegate that admits every merge, so tests reach the
+// code paths that run after the merge decision.
+type acceptMerge struct{}
+
+func (acceptMerge) NotifyMerge([]*Node) error { return nil }
