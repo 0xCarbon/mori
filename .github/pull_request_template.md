@@ -1,11 +1,14 @@
 ## Description
 
-<!-- Provide a summary of what the PR does and why it is being submitted. -->
+<!-- What the change does and why. Link the issue it fixes ("Fixes #123"). -->
 
-## Related Issue
+## How has this been tested?
 
-<!-- If this PR is linked to any issue, provide the issue number or description here. Any related JIRA tickets can also be added here. -->
+<!-- Tests added or changed; for fixes, the failing output before the fix.
+     Benchmark, fuzz or interop evidence goes here, not in the tree. -->
 
-## How Has This Been Tested?
+### Checklist
 
-<!-- Describe how the changes have been tested. Provide test instructions or details. -->
+- [ ] `make ci` passes (and `make oracle` for changes to `internal/wire` or `internal/msgpack`).
+- [ ] Behavior changes have tests, docs and a CHANGELOG entry under `Unreleased`.
+- [ ] If an AI tool helped, I have read and followed the [AI usage guide](https://github.com/0xCarbon/mori/blob/main/CONTRIBUTING.md#ai-usage).

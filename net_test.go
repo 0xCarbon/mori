@@ -6,8 +6,10 @@ package mori
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"reflect"
 	"runtime"
@@ -17,6 +19,8 @@ import (
 	"time"
 
 	"github.com/0xCarbon/mori/internal/msgpack"
+
+	iretry "github.com/0xCarbon/mori/internal/retry"
 )
 
 // As a regression we left this test very low-level and network-ey, even after
@@ -1372,4 +1376,319 @@ func TestSendReliableRefusesOversizedMessages(t *testing.T) {
 	to := &Node{Name: "node2", Addr: net.ParseIP("127.0.0.2"), Port: 1}
 	err := m1.SendReliable(to, make([]byte, maxUserMsgBytes+1))
 	isErr(t, err, "an undeliverable stream user message was reported as sent")
+}
+
+// TestReadStreamAcceptsIncompressibleCompressedState: upstream memberlist
+// and Mori v0.8.0 senders compress stream messages whether or not that
+// shrinks them, and LZW expands
+// incompressible data (about 1.37x, at most 1.5x). A push/pull whose
+// decompressed form is within maxDecompressedBytes must be accepted even
+// when its compressed form is larger than that.
+func TestReadStreamAcceptsIncompressibleCompressedState(t *testing.T) {
+	if raceDetector {
+		t.Skip("single-goroutine size check; ~33 MB of input costs 16 s under the race detector")
+	}
+	m := GetMemberlist(t, func(c *Config) { c.Transport = (&MockNetwork{}).NewTransport("node") })
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	// A large cluster: 20,000 nodes with 512 bytes of random meta and a
+	// full 20 MiB of random user state — about 32.7 MB decompressed.
+	r := rand.New(rand.NewPCG(1, 2))
+	random := func(n int) []byte {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte(r.Uint32())
+		}
+		return b
+	}
+	const nodes = 20_000
+	user := random(maxPushStateBytes)
+	state := pushPullHeader{Nodes: nodes, UserStateLen: len(user)}.AppendMsgpack([]byte{byte(pushPullMsg)})
+	for i := range nodes {
+		n := pushNodeState{Name: fmt.Sprint("node-", i), Addr: []byte{10, 1, byte(i >> 8), byte(i)}, Port: 7946, Meta: random(512), Incarnation: 1, Vsn: []uint8{1, 5, 2, 0, 0, 0}}
+		state = n.AppendMsgpack(state)
+	}
+	state = append(state, user...)
+	lessOrEqual(t, len(state), maxDecompressedBytes, "decompressed size")
+	compressed, err := compressPayload(state)
+	noErr(t, err)
+	if len(compressed) <= maxStreamMessageBytes {
+		t.Fatalf("test input compressed to %d bytes; it must exceed the %d-byte plaintext cap", len(compressed), maxStreamMessageBytes)
+	}
+
+	_, dec, err := m.readStream(streamFrom(t, compressed), "")
+	noErr(t, err, "compressed stream of %d bytes (%d decompressed)", len(compressed), len(state))
+	_, got, gotUser, err := m.readRemoteState(dec)
+	noErr(t, err)
+	equal(t, nodes, len(got))
+	isTrue(t, bytes.Equal(user, gotUser), "user state corrupted")
+}
+
+// TestReadStreamOversizedDeclaredFields covers issue #21: a stream whose
+// compressed buffer or node field declares a large length — within the
+// field limits, so only allocation that grows with the bytes received can
+// save memory — but carries 1 KiB is refused without allocating the
+// declared size.
+func TestReadStreamOversizedDeclaredFields(t *testing.T) {
+	m := GetMemberlist(t, func(c *Config) { c.Transport = (&MockNetwork{}).NewTransport("node") })
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	str32 := func(b []byte, n uint32) []byte {
+		return binary.BigEndian.AppendUint32(append(b, 0xdb), n)
+	}
+	compressedBuf := []byte{byte(compressMsg), 0x82, 0xa4, 'A', 'l', 'g', 'o', 0x00, 0xa3, 'B', 'u', 'f'}
+	compressedBuf = append(str32(compressedBuf, 60<<20), make([]byte, 1024)...)
+
+	nodeMeta := pushPullHeader{Nodes: 1}.AppendMsgpack([]byte{byte(pushPullMsg)})
+	nodeMeta = append(nodeMeta, 0x82, 0xa4, 'N', 'a', 'm', 'e', 0xa1, 'p', 0xa4, 'M', 'e', 't', 'a')
+	nodeMeta = append(str32(nodeMeta, 1<<20), make([]byte, 1024)...)
+
+	for _, tc := range []struct {
+		name   string
+		stream []byte
+		budget uint64 // well below the declared length
+	}{
+		{"compress.Buf", compressedBuf, 4 << 20},
+		{"pushNodeState.Meta", nodeMeta, 512 << 10},
+	} {
+		stream := tc.stream
+		t.Run(tc.name, func(t *testing.T) {
+			var readErr error
+			alloc := allocatedBytes(func() {
+				msgType, dec, err := m.readStream(streamFrom(t, stream), "")
+				if err != nil {
+					readErr = err
+					return
+				}
+				if msgType == pushPullMsg {
+					_, _, _, readErr = m.readRemoteState(dec)
+				}
+			})
+			isErr(t, readErr)
+			lessOrEqual(t, alloc, tc.budget, "allocation for a %d-byte stream", len(stream))
+		})
+	}
+}
+
+// TestEncryptedStreamSenderLimit: receivers refuse encrypted stream
+// messages whose ciphertext exceeds maxPushStateBytes, so senders must fail
+// with ErrMessageTooLarge rather than send something that is dropped. The
+// boundary is exact: the largest user message whose stream (type byte,
+// header, payload) encrypts to maxPushStateBytes is delivered, one byte
+// more is refused.
+func TestEncryptedStreamSenderLimit(t *testing.T) {
+	n := &MockNetwork{}
+	key := []byte("0123456789abcdef")
+	m1 := GetMemberlist(t, func(c *Config) {
+		c.Transport = n.NewTransport("node1")
+		c.SecretKey = key
+		c.EnableCompression = false
+	})
+	t.Cleanup(func() { _ = m1.Shutdown() })
+	d2 := &MockDelegate{}
+	m2 := GetMemberlist(t, func(c *Config) {
+		c.Transport = n.NewTransport("node2")
+		c.SecretKey = key
+		c.Delegate = d2
+	})
+	t.Cleanup(func() { _ = m2.Shutdown() })
+
+	// The stream around a user message of length L is 1 type byte plus the
+	// encoded header; its ciphertext is encryptedLength of that total.
+	streamLen := func(l int) int { return len(userMsgHeader{UserMsgLen: l}.AppendMsgpack([]byte{byte(userMsg)})) + l }
+	largest := maxPushStateBytes - encryptedLength(m1.encryptionVersion(), streamLen(0))
+	for encryptedLength(m1.encryptionVersion(), streamLen(largest)) > maxPushStateBytes {
+		largest--
+	}
+	equal(t, maxPushStateBytes, encryptedLength(m1.encryptionVersion(), streamLen(largest)), "boundary derivation")
+
+	to := &Node{Name: "node2", Addr: net.ParseIP("127.0.0.2"), Port: 1}
+	errIs(t, m1.SendReliable(to, make([]byte, largest+1)), ErrMessageTooLarge)
+	noErr(t, m1.SendReliable(to, make([]byte, largest)), "the largest message within the encrypted limit")
+	iretry.Run(t, func(r *iretry.R) {
+		msgs := d2.getMessages()
+		if len(msgs) != 1 || len(msgs[0]) != largest {
+			r.Fatalf("receiver got %d messages, want one of %d bytes", len(msgs), largest)
+		}
+	})
+}
+
+// TestReadStreamPlaintextCapEdge: a plaintext stream message of exactly
+// maxStreamMessageBytes (type byte included) is accepted; one byte more is
+// refused.
+func TestReadStreamPlaintextCapEdge(t *testing.T) {
+	if raceDetector {
+		t.Skip("single-goroutine size check; two 40 MiB streams are slow under the race detector")
+	}
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Transport = (&MockNetwork{}).NewTransport("node")
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	// A push/pull with a full user state and one node whose meta pads the
+	// message to the target size (meta stays within wire.MaxFieldBytes by
+	// spreading it over several nodes).
+	build := func(total int) []byte {
+		const nodes = 24
+		fixed := func(meta int) int {
+			b := pushPullHeader{Nodes: nodes, UserStateLen: maxPushStateBytes}.AppendMsgpack([]byte{byte(pushPullMsg)})
+			for i := range nodes {
+				b = pushNodeState{Name: fmt.Sprintf("n%02d", i), Addr: []byte{10, 0, 0, 1}, Port: 7946, Meta: make([]byte, meta), Incarnation: 1, Vsn: []uint8{1, 5, 2, 0, 0, 0}}.AppendMsgpack(b)
+			}
+			return len(b) + maxPushStateBytes
+		}
+		meta := (total - fixed(0)) / nodes
+		for fixed(meta) > total {
+			meta--
+		}
+		b := pushPullHeader{Nodes: nodes, UserStateLen: maxPushStateBytes}.AppendMsgpack([]byte{byte(pushPullMsg)})
+		extra := total - fixed(meta) // the remainder goes to the last node
+		for i := range nodes {
+			l := meta
+			if i == nodes-1 {
+				l += extra
+			}
+			b = pushNodeState{Name: fmt.Sprintf("n%02d", i), Addr: []byte{10, 0, 0, 1}, Port: 7946, Meta: make([]byte, l), Incarnation: 1, Vsn: []uint8{1, 5, 2, 0, 0, 0}}.AppendMsgpack(b)
+		}
+		return append(b, make([]byte, maxPushStateBytes)...)
+	}
+	for _, tc := range []struct {
+		total int
+		ok    bool
+	}{{maxStreamMessageBytes, true}, {maxStreamMessageBytes + 1, false}} {
+		stream := build(tc.total)
+		equal(t, tc.total, len(stream), "test stream size")
+		_, dec, err := m.readStream(streamFrom(t, stream), "")
+		noErr(t, err)
+		_, _, _, err = m.readRemoteState(dec)
+		if (err == nil) != tc.ok {
+			t.Fatalf("%d-byte plaintext message: error %v, want accepted=%v", tc.total, err, tc.ok)
+		}
+	}
+}
+
+// TestStreamCompressionOnlyWhenSmaller: like packets, stream messages go
+// out compressed only when that makes them smaller.
+func TestStreamCompressionOnlyWhenSmaller(t *testing.T) {
+	m := GetMemberlist(t, func(c *Config) {
+		c.Transport = (&MockNetwork{}).NewTransport("node")
+		c.EnableCompression = true
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	r := rand.New(rand.NewPCG(5, 6))
+	random := make([]byte, 4096)
+	for i := range random {
+		random[i] = byte(r.Uint32())
+	}
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+		want    messageType
+	}{
+		{"incompressible", random, userMsg},
+		{"compressible", make([]byte, 4096), compressMsg},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := append(userMsgHeader{UserMsgLen: len(tc.payload)}.AppendMsgpack([]byte{byte(userMsg)}), tc.payload...)
+			local, remote := net.Pipe()
+			got := make(chan []byte, 1)
+			go func() {
+				b, _ := io.ReadAll(remote)
+				got <- b
+			}()
+			noErr(t, m.rawSendMsgStream(local, msg, ""))
+			_ = local.Close()
+			sent := <-got
+			equal(t, tc.want, messageType(sent[0]))
+			lessOrEqual(t, len(sent), len(msg), "sent size")
+		})
+	}
+}
+
+// TestSendLocalStateTooLarge: a push/pull state receivers would refuse
+// (user state above maxPushStateBytes, or a plaintext message above
+// maxStreamMessageBytes) fails with ErrMessageTooLarge before any write.
+func TestSendLocalStateTooLarge(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		nodes int
+		state int
+	}{
+		{"user state", 0, maxPushStateBytes + 1},
+		{"plaintext message", 24, maxPushStateBytes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &MockDelegate{state: make([]byte, tc.state)}
+			m := GetMemberlist(t, func(c *Config) {
+				c.Transport = (&MockNetwork{}).NewTransport("node")
+				c.EnableCompression = false
+				c.Delegate = d
+			})
+			t.Cleanup(func() { _ = m.Shutdown() })
+			vsn := []uint8{ProtocolVersionMin, ProtocolVersionMax, ProtocolVersionMax, 0, 0, 0}
+			for i := range tc.nodes {
+				m.aliveNode(&alive{Node: fmt.Sprintf("n%02d", i), Addr: []byte{10, 0, 0, byte(i + 1)}, Port: 7946, Meta: make([]byte, 900<<10), Incarnation: 1, Vsn: vsn}, false)
+			}
+			w := &countingConn{}
+			errIs(t, m.sendLocalState(w, false, ""), ErrMessageTooLarge)
+			equal(t, 0, w.n, "bytes written")
+		})
+	}
+}
+
+// countingConn is a net.Conn that counts and discards writes.
+type countingConn struct {
+	net.Conn
+	n int
+}
+
+func (c *countingConn) Write(b []byte) (int, error) { c.n += len(b); return len(b), nil }
+
+func (c *countingConn) SetDeadline(time.Time) error { return nil }
+
+func (c *countingConn) RemoteAddr() net.Addr { return &net.TCPAddr{} }
+
+// TestPushPullOversizeRemoteStateReportsCause: when the responder's state
+// is too large to send, the initiator gets the cause as a remote error
+// instead of a bare EOF.
+func TestPushPullOversizeRemoteStateReportsCause(t *testing.T) {
+	n := &MockNetwork{}
+	key := []byte("0123456789abcdef")
+	m1 := GetMemberlist(t, func(c *Config) {
+		c.Transport = n.NewTransport("node1")
+		c.SecretKey = key
+	})
+	t.Cleanup(func() { _ = m1.Shutdown() })
+	m2 := GetMemberlist(t, func(c *Config) {
+		c.Transport = n.NewTransport("node2")
+		c.SecretKey = key
+		c.EnableCompression = false
+		// Within the user state limit, but its ciphertext is not.
+		c.Delegate = &MockDelegate{state: make([]byte, maxPushStateBytes)}
+	})
+	t.Cleanup(func() { _ = m2.Shutdown() })
+
+	_, _, err := m1.sendAndReceiveState(Address{Addr: "127.0.0.2:1", Name: "node2"}, false)
+	if err == nil || !strings.Contains(err.Error(), "remote error") || !strings.Contains(err.Error(), ErrMessageTooLarge.Error()) {
+		t.Fatalf("push/pull error %v, want a remote error carrying %q", err, ErrMessageTooLarge)
+	}
+}
+
+// TestCompressedStreamBudgetCoversLZWWorstCase pins
+// maxCompressedStreamBytes to the largest compressed/lzw output of a
+// maxDecompressedBytes payload: at most one 12-bit code per input byte, an
+// initial clear code, one clear code per 3,838 data codes (compress/lzw
+// clears when the next code reaches 4095, starting from 257), the end
+// code, and the compress.Buf framing (type byte, map with Algo and Buf
+// entries, 5-byte raw header).
+func TestCompressedStreamBudgetCoversLZWWorstCase(t *testing.T) {
+	const n = maxDecompressedBytes
+	codes := n + n/3838 + 2 // data, clear codes, end code
+	lzw := (codes*12 + 7) / 8
+	framing := len(compress{Algo: uint8(lzwAlgo), Buf: make([]byte, 1<<17)}.AppendMsgpack([]byte{byte(compressMsg)})) - 1<<17
+	if need := framing + lzw; maxCompressedStreamBytes < need {
+		t.Fatalf("maxCompressedStreamBytes = %d, want >= %d (LZW worst case of %d bytes)", maxCompressedStreamBytes, need, n)
+	}
 }

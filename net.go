@@ -105,6 +105,15 @@ const (
 	// maxStreamMessageBytes bounds the plaintext bytes read for one stream
 	// message (type byte, headers, node states and user payload).
 	maxStreamMessageBytes = maxDecompressedBytes
+
+	// maxCompressedStreamBytes bounds a compressed stream message as read
+	// from the connection. Upstream memberlist and Mori v0.8.0 senders
+	// compress stream messages whether or not that shrinks them, and LZW
+	// expands incompressible input: each code is at most 12 bits and covers
+	// at least one byte (1.5x), plus an initial clear code, a clear code per
+	// 3,838 data codes and the end code. A message within
+	// maxDecompressedBytes must fit.
+	maxCompressedStreamBytes = maxDecompressedBytes*3/2 + maxDecompressedBytes/1024 + 64<<10
 )
 
 // The protocol messages and their codec live in internal/wire; these
@@ -237,6 +246,14 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 
 		if err := m.sendLocalState(conn, join, streamLabel); err != nil {
 			m.logger.Error("failed to push local state", "error", err, connAttr(conn))
+			// Nothing was written; tell the initiator why instead of
+			// leaving it a bare EOF.
+			if errors.Is(err, ErrMessageTooLarge) {
+				out := encode(errMsg, errResp{Error: err.Error()})
+				if err := m.rawSendMsgStream(conn, out, streamLabel); err != nil {
+					m.logger.Error("failed to send error", "error", err, connAttr(conn))
+				}
+			}
 			return
 		}
 
@@ -810,18 +827,24 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 // rawSendMsgStream is used to stream a message to another host without
 // modification, other than applying compression and encryption if enabled.
 func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel string) error {
-	// Check if compression is enabled
+	// Check if compression is enabled; like packets, send the compressed
+	// form only when it is smaller (LZW expands incompressible input).
 	if m.config.EnableCompression {
 		compBuf, err := compressPayload(sendBuf)
 		if err != nil {
 			m.logger.Error("failed to compress payload", "error", err)
-		} else {
+		} else if len(compBuf) < len(sendBuf) {
 			sendBuf = compBuf
 		}
 	}
 
 	// Check if encryption is enabled
 	if m.config.EncryptionEnabled() && m.config.GossipVerifyOutgoing {
+		// Receivers refuse encrypted stream messages above
+		// maxPushStateBytes; fail here with a clear error instead.
+		if n := encryptedLength(m.encryptionVersion(), len(sendBuf)); n > maxPushStateBytes {
+			return fmt.Errorf("%w: encrypted stream message of %d bytes > %d", ErrMessageTooLarge, n, maxPushStateBytes)
+		}
 		crypt, err := m.encryptLocalState(sendBuf, streamLabel)
 		if err != nil {
 			m.logger.Error("failed to encrypt local state", "error", err)
@@ -966,10 +989,14 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 	out = append(out, userData...)
 
 	m.metrics.gauge(keySizeLocal, float32(len(out)))
-	// Peers refuse plaintext stream messages above maxStreamMessageBytes;
-	// report the cause here instead of an opaque failure there.
+	// Peers refuse user state above maxPushStateBytes and plaintext stream
+	// messages above maxStreamMessageBytes; report the cause here instead
+	// of an opaque failure there.
+	if len(userData) > maxPushStateBytes {
+		return fmt.Errorf("%w: local user state of %d bytes > %d", ErrMessageTooLarge, len(userData), maxPushStateBytes)
+	}
 	if len(out) > maxStreamMessageBytes {
-		return fmt.Errorf("local push/pull state is %d bytes, above the %d-byte stream limit", len(out), maxStreamMessageBytes)
+		return fmt.Errorf("%w: local push/pull state of %d bytes > %d", ErrMessageTooLarge, len(out), maxStreamMessageBytes)
 	}
 	return m.rawSendMsgStream(conn, out, streamLabel)
 }
@@ -1045,11 +1072,12 @@ func (m *Memberlist) decryptRemoteState(bufConn io.Reader, streamLabel string) (
 // The provided streamLabel if present will be authenticated during decryption
 // of each message.
 func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType, *msgpack.Decoder, error) {
-	// Created a buffered reader. Every stream message is bounded: encrypted
-	// and compressed payloads carry their own limits, and this caps the
-	// plaintext form, whose size is otherwise only implied by the headers
-	// and the variable-length fields inside it.
-	bufConn := bufio.NewReader(io.LimitReader(conn, maxStreamMessageBytes))
+	// Created a buffered reader. Every stream message is bounded: the
+	// connection as a whole by the largest valid compressed message,
+	// encrypted payloads by their length check, and plaintext messages —
+	// whose size is otherwise only implied by their headers and fields —
+	// by maxStreamMessageBytes below.
+	bufConn := bufio.NewReader(io.LimitReader(conn, maxCompressedStreamBytes))
 
 	// Read the message type
 	b, err := bufConn.ReadByte()
@@ -1057,7 +1085,15 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 		return 0, nil, err
 	}
 	msgType := messageType(b)
-	dec := msgpack.NewStreamDecoder(bufConn)
+	var dec *msgpack.Decoder
+	switch msgType {
+	case compressMsg:
+		dec = msgpack.NewStreamDecoder(bufConn)
+	case encryptMsg:
+		// Decoded from the decrypted slice below.
+	default:
+		dec = msgpack.NewStreamDecoder(&limitedSource{r: bufConn, n: maxStreamMessageBytes - 1})
+	}
 
 	// Check if the message is encrypted
 	if msgType == encryptMsg {
@@ -1102,6 +1138,36 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 	}
 
 	return msgType, dec, nil
+}
+
+// limitedSource is a msgpack.Source reading at most n more bytes of r, then
+// reporting EOF.
+type limitedSource struct {
+	r *bufio.Reader
+	n int64
+}
+
+func (s *limitedSource) Read(p []byte) (int, error) {
+	if s.n <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > s.n {
+		p = p[:s.n]
+	}
+	k, err := s.r.Read(p)
+	s.n -= int64(k)
+	return k, err
+}
+
+func (s *limitedSource) ReadByte() (byte, error) {
+	if s.n <= 0 {
+		return 0, io.EOF
+	}
+	c, err := s.r.ReadByte()
+	if err == nil {
+		s.n--
+	}
+	return c, err
 }
 
 // readRemoteState is used to read the remote state from a connection

@@ -99,6 +99,7 @@ With a key set and verification enforced, Mori defends against:
 | --- | --- |
 | Encrypted stream message | 20 MiB ciphertext |
 | Plaintext stream message (headers, node states, user state) | 40 MiB |
+| Compressed stream message (as read) | about 60 MiB (the largest valid LZW form of a 40 MiB payload) |
 | Decompressed stream payload | 40 MiB |
 | Decompressed packet payload | 1 MiB |
 | Push/pull node count | 1,048,576, storage grown per received state |

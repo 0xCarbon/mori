@@ -2,11 +2,42 @@
 
 ### Improvements
 
+* `CONTRIBUTING.md` and an updated pull request template (adapted from
+  upstream hashicorp/memberlist #375).
+
 ### Changes
 
 ### Fixed
 
+* A compressed stream message is read against the largest valid compressed
+  form of a `maxDecompressedBytes` message (LZW expands incompressible
+  input by about 1.37x, 1.41x at worst in practice, 1.5x in theory), not
+  the 40 MiB plaintext cap. Upstream memberlist and Mori v0.8.0 senders
+  compress stream messages whether or not that shrinks them, so v0.8.0 refused legitimate unencrypted push/pull
+  states from about 28 to 40 MiB with incompressible content. Plaintext
+  stream messages keep the 40 MiB cap. Encrypted stream messages remain
+  limited to 20 MiB of ciphertext, as upstream.
+* Stream messages are sent compressed only when that makes them smaller,
+  as packets already were. Incompressible push/pull states no longer grow
+  by up to 1.4x on the wire (which, with encryption, could push a state
+  that fits uncompressed over the 20 MiB ciphertext limit). Wire
+  compatible: receivers accept both forms.
+* Senders now refuse, with `ErrMessageTooLarge`, an encrypted stream message
+  (push/pull state or `SendReliable`) whose ciphertext exceeds the 20 MiB
+  receivers accept; before, the receiver dropped it with an error only it
+  logged. A push/pull state with user state above 20 MiB or a plaintext
+  message above 40 MiB also fails with `ErrMessageTooLarge` (before: an
+  unwrapped error, or no error for the user state). A responder whose
+  state is too large now answers the initiator with that error instead of
+  closing the stream, so `Join` reports the cause rather than `EOF`.
+  `ErrMessageTooLarge`'s text is now "memberlist: stream message exceeds
+  the size receivers accept".
+
 ### Security
+
+* Regression tests for issue #21: a stream whose compressed buffer (60 MiB)
+  or node meta (1 MiB) declares a length within the field limits but
+  carries 1 KiB is refused without allocating the declared size.
 
 ## v0.8.0 (Mori)
 

@@ -97,7 +97,9 @@ during a rolling upgrade. Two new receive limits can refuse traffic a v0.7
 node accepted: stream user messages above 20 MiB (`SendReliable` now fails
 with `ErrMessageTooLarge` on the sender), and plaintext or decompressed
 push/pull states above 40 MiB — roughly 65,000 nodes with 512-byte meta;
-encrypted push/pull was already capped at 20 MiB upstream.
+encrypted push/pull was already capped at 20 MiB upstream. A Mori node
+also refuses to send push/pull user state above 20 MiB, which Mori
+receivers refuse but upstream memberlist receivers accept.
 
 ## Migrating from hashicorp/memberlist
 
@@ -184,7 +186,8 @@ cross builds, the dependency audit (`tools/checkdeps`), `go mod tidy -diff`,
 the test suite, the race detector and a benchmark smoke. The suite runs in
 about five seconds: timer-driven protocol tests use `testing/synctest` on an
 in-memory network (`simnet_test.go`) and assert exact timings. See
-[AGENTS.md](AGENTS.md) for the contribution rules.
+[CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for the
+contribution rules.
 
 ## License
 
