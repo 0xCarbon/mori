@@ -29,13 +29,31 @@ Mori exists to serve the [taba](https://github.com/0xCarbon/taba) stack
 * Room for features upstream does not want or need. Fork-specific changes are
   documented in the [CHANGELOG](CHANGELOG.md).
 
-Upstream `master` is merged in periodically when it benefits Mori.
+Upstream `master` is reviewed periodically; fixes that benefit Mori are
+ported (with regression tests), not merged wholesale: the code bases have
+diverged. Mori's wire protocol stays compatible with memberlist peers.
 
 ## Fork-specific features
 
 Beyond the fork point, Mori adds capabilities that are not in upstream
 memberlist (see the [CHANGELOG](CHANGELOG.md) for exact semantics):
 
+* **No dependencies.** The module requires nothing but the Go standard
+  library (Go 1.27+): no go-msgpack, go-metrics, go-sockaddr, miekg/dns,
+  btree or testify. It owns its MessagePack codec, byte-for-byte compatible
+  with go-msgpack (proven by golden vectors, a randomized differential and
+  mixed-version clusters against v0.7.0; see `project/evidence/`).
+* **Hardened input handling.** Every length or count from the network is
+  bounded before it can size an allocation, decoders never panic, and the
+  packet and stream paths are fuzzed end to end. See
+  [SECURITY.md](SECURITY.md) for the threat model and the bounds.
+* **Structured logging and per-instance metrics.** `Config.Logger` is a
+  `*slog.Logger`; `Config.Metrics` is a `MetricSink` interface owned by the
+  instance (no global registry), with the metric list documented on it.
+* **Performance.** Handling an alive message is 6× faster with 5× fewer
+  allocations than v0.7.0; compressed and encrypted packets reuse pooled LZW coders
+  and cached AES-GCM ciphers; the UDP listener no longer allocates 64 KiB per
+  datagram (measurements in `project/evidence/w7-perf`).
 * **Configurable node-meta cap** — `Config.MetaMaxSize` sets the producer-side
   limit (bytes) on `Delegate.NodeMeta`, validated fail-fast against the
   transport packet budget at `Create`; oversized meta returns `ErrMetaTooLarge`
@@ -58,9 +76,27 @@ memberlist (see the [CHANGELOG](CHANGELOG.md) for exact semantics):
   interface lets a transport advertise its largest deliverable payload;
   `NetTransport` reports the 65507-byte IPv4 UDP ceiling.
 
+## Upgrading from v0.7
+
+v0.8 changes the API in a few places (full list under **BREAKING** in the
+[CHANGELOG](CHANGELOG.md)):
+
+* `Config.LogOutput` is gone and `Config.Logger` is a `*slog.Logger` (nil
+  uses `slog.Default()`). Replace `c.LogOutput = io.Discard` with
+  `c.Logger = slog.New(slog.DiscardHandler)`. The `LogAddress`/`LogConn`/
+  `LogStringAddress` helpers are removed.
+* Metrics go to `Config.Metrics` (a `MetricSink`); `Config.MetricLabels` is
+  `[]mori.Label`. The CHANGELOG shows a four-method adapter to go-metrics.
+* `Config.MsgpackUseNewTimeFormat` is removed (it had no effect).
+* `Node.State` now reports the real state in `Members()`, `LocalNode()` and
+  event callbacks (it was always `StateAlive`).
+
+The wire protocol is unchanged: v0.7 and v0.8 nodes can run in one cluster
+during a rolling upgrade.
+
 ## Migrating from hashicorp/memberlist
 
-The fork point (v0.6.0) is API-compatible with upstream — only the module
+The fork point (v0.6.0) was API-compatible with upstream — only the module
 path and package identifier changed:
 
 * `import "github.com/hashicorp/memberlist"` → `import "github.com/0xCarbon/mori"`
@@ -70,9 +106,10 @@ No `replace` directive is needed — depend on `github.com/0xCarbon/mori`
 directly.
 
 Since v0.7.0 the API has diverged from upstream: new `Config` knobs,
-context-aware `Leave`/`UpdateNode`, typed sentinel errors, and asynchronous
-`EventDelegate` delivery. See [Fork-specific features](#fork-specific-features)
-and the [CHANGELOG](CHANGELOG.md) before upgrading across that boundary.
+context-aware `Leave`/`UpdateNode`, typed sentinel errors, asynchronous
+`EventDelegate` delivery, and (v0.8) slog logging and per-instance metrics.
+See [Fork-specific features](#fork-specific-features) and the
+[CHANGELOG](CHANGELOG.md) before upgrading across those boundaries.
 
 ## Usage
 
@@ -129,18 +166,20 @@ For details on all of these extensions, please read the paper "[Lifeguard :
 SWIM-ing with Situational Awareness](https://arxiv.org/abs/1707.00788)", along
 with the source.
 
-## Metrics Emission and Compatibility
+## Metrics
 
-This library can emit metrics using either `github.com/armon/go-metrics` or
-`github.com/hashicorp/go-metrics`. Choosing between the libraries is
-controlled via build tags.
+Set `Config.Metrics` to any implementation of `MetricSink` (four methods,
+the shape of go-metrics' labeled calls); nil disables metrics. The metric
+names (`memberlist.*`) and kinds are listed on the `MetricSink` type.
 
-**Build Tags**
-* `armonmetrics` - Using this tag will cause metrics to be routed to `armon/go-metrics`
-* `hashicorpmetrics` - Using this tag will cause all metrics to be routed to `hashicorp/go-metrics`
+## Development
 
-If no build tag is specified, the default behavior is to use `armon/go-metrics`,
-which is deprecated — new code should build with the `hashicorpmetrics` tag.
+`make ci` runs every gate: gofmt, `go fix -diff`, vet, golangci-lint, build,
+cross builds, the dependency audit (`tools/checkdeps`), `go mod tidy -diff`,
+the test suite, the race detector and a benchmark smoke. The suite runs in
+about five seconds: timer-driven protocol tests use `testing/synctest` on an
+in-memory network (`simnet_test.go`) and assert exact timings. See
+[AGENTS.md](AGENTS.md) for the contribution rules.
 
 ## License
 

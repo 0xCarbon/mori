@@ -104,13 +104,16 @@ bench:
 	$(GO) test -run '^$$' -bench '$(BENCH)' -benchmem -count=$(BENCH_COUNT) ./... | tee dist/bench.txt
 
 FUZZ_TIME ?= 10s
+# Every fuzz target of every package, FUZZ_TIME each. An empty list is a
+# failure, never a silent pass.
 fuzz-smoke:
-	@targets="$$($(GO) test -list '^Fuzz' . | grep '^Fuzz' || true)"; \
-	if [ -z "$$targets" ]; then echo "ERROR: no fuzz targets found"; exit 1; fi; \
-	for t in $$targets; do \
-		echo "==> $$t ($(FUZZ_TIME))"; \
-		$(GO) test -run '^$$' -fuzz "^$$t$$" -fuzztime $(FUZZ_TIME) . ; \
-	done
+	@found=0; for pkg in $$($(GO) list ./...); do \
+		for t in $$($(GO) test -list '^Fuzz' $$pkg | grep '^Fuzz' || true); do \
+			found=1; echo "==> $$pkg $$t ($(FUZZ_TIME))"; \
+			$(GO) test -run '^$$' -fuzz "^$$t$$" -fuzztime $(FUZZ_TIME) $$pkg || exit 1; \
+		done; \
+	done; \
+	if [ $$found = 0 ]; then echo "ERROR: no fuzz targets found"; exit 1; fi
 
 # Optional local gate from the golang-modernization skill: go fix plus
 # golangci-lint v2, reported as findings without applying fixes.

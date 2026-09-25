@@ -1,5 +1,14 @@
 ## Unreleased
 
+This release (the v0.8.0 candidate) makes Mori a standard-library-only
+module, ports the upstream security fixes released after the fork point and
+closes further instances of the same classes, replaces go-msgpack with an
+owned and fuzzed codec proven byte-compatible (a v0.7 and a v0.8 node can
+share a cluster), moves logging to `log/slog` and metrics to a per-instance
+sink, and fixes several inherited bugs. It contains **BREAKING** API changes
+(logging, metrics, a removed config field) and requires **Go 1.27.1**;
+consumers on older toolchains must raise their `go` directive to adopt it.
+
 ### Improvements
 
 * Performance, compared with the code before this release (two interleaved
@@ -33,6 +42,8 @@
 
 ### Changes
 
+* **BREAKING:** requires Go 1.27.1 (`go.mod`), matching the 0xCarbon
+  ecosystem toolchain; the module has no `require` lines at all.
 * **BREAKING:** logging uses `log/slog`. `Config.Logger` is a
   `*slog.Logger` (nil means `slog.Default()`); `Config.LogOutput` is
   removed, as are the `LogAddress`, `LogConn` and `LogStringAddress`
@@ -112,6 +123,13 @@
   mutated in place, so the copies are safe to read lock-free.
 
 ### Security
+
+* `SECURITY.md` documents the threat model (adapted from upstream) and every
+  input bound Mori enforces. Fuzz targets cover the whole packet path
+  (plaintext and encrypted, through the live state machine), the stream
+  path including push/pull merge, the message decoders and the MessagePack
+  decoder; `make fuzz-smoke` runs them in CI. Tens of millions of executions
+  found no failure after the fixes below.
 
 Ports the four upstream hashicorp/memberlist fixes released after the fork
 point, and closes further instances of the same classes found while

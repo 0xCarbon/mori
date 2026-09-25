@@ -448,27 +448,28 @@ func (m *Memberlist) packetHandler() {
 				if !ok {
 					break
 				}
-				msgType := msg.msgType
-				buf := msg.buf
-				from := msg.from
-
-				switch msgType {
-				case suspectMsg:
-					m.handleSuspect(buf, from)
-				case aliveMsg:
-					m.handleAlive(buf, from)
-				case deadMsg:
-					m.handleDead(buf, from)
-				case userMsg:
-					m.handleUser(buf, from)
-				default:
-					m.logger.Error("message type not supported by the packet handler", "type", msgType, addrAttr(from))
-				}
+				m.handleQueued(msg)
 			}
 
 		case <-m.shutdownCh:
 			return
 		}
+	}
+}
+
+// handleQueued processes one message queued by handleCommand.
+func (m *Memberlist) handleQueued(msg msgHandoff) {
+	switch msg.msgType {
+	case suspectMsg:
+		m.handleSuspect(msg.buf, msg.from)
+	case aliveMsg:
+		m.handleAlive(msg.buf, msg.from)
+	case deadMsg:
+		m.handleDead(msg.buf, msg.from)
+	case userMsg:
+		m.handleUser(msg.buf, msg.from)
+	default:
+		m.logger.Error("message type not supported by the packet handler", "type", msg.msgType, addrAttr(msg.from))
 	}
 }
 

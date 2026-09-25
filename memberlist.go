@@ -161,6 +161,23 @@ func (conf *Config) BuildVsnArray() []uint8 {
 // newMemberlist creates the network listeners.
 // Does not schedule execution of background maintenance.
 func newMemberlist(conf *Config) (*Memberlist, error) {
+	m, err := buildMemberlist(conf)
+	if err != nil {
+		return nil, err
+	}
+	m.goBackground(m.streamListen)
+	m.goBackground(m.packetListen)
+	m.goBackground(m.packetHandler)
+	m.goBackground(m.checkBroadcastQueueDepth)
+	m.eventWG.Go(m.eventDispatch)
+	return m, nil
+}
+
+// buildMemberlist validates conf and assembles an instance without
+// starting any goroutine: newMemberlist starts the listeners, handler and
+// event dispatcher. Tests that drive the handlers synchronously use it
+// directly.
+func buildMemberlist(conf *Config) (*Memberlist, error) {
 	if conf.ProtocolVersion < ProtocolVersionMin {
 		return nil, fmt.Errorf("protocol version '%d' too low. Must be in range: [%d, %d]",
 			conf.ProtocolVersion, ProtocolVersionMin, ProtocolVersionMax)
@@ -315,11 +332,6 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		return nil, err
 	}
 
-	m.goBackground(m.streamListen)
-	m.goBackground(m.packetListen)
-	m.goBackground(m.packetHandler)
-	m.goBackground(m.checkBroadcastQueueDepth)
-	m.eventWG.Go(m.eventDispatch)
 	return m, nil
 }
 
