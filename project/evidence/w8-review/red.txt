@@ -1,9 +1,0 @@
-    helpers_test.go:52: nameless node states accepted: expected an error, got nil
-    helpers_test.go:52: an undeliverable stream user message was reported as sent: expected an error, got nil
-FAIL
-FAIL	github.com/0xCarbon/mori	0.194s
-FAIL
-    msgpack_test.go:370: map count 2^31 accepted as -2147483648
-FAIL
-FAIL	github.com/0xCarbon/mori/internal/msgpack	0.002s
-FAIL

@@ -1,4 +1,0 @@
-    state_test.go:2786: Members() reports "suspect" as state 0, want StateSuspect
-FAIL
-FAIL	github.com/0xCarbon/mori	0.003s
-FAIL

@@ -1,20 +1,27 @@
 // Copyright (c) 0xCarbon
 // SPDX-License-Identifier: MPL-2.0
 
-// Command w5wire is the W5 oracle for Mori's owned wire codec
-// (internal/wire). It pins the codec to github.com/hashicorp/go-msgpack/v2
-// with a default MsgpackHandle — the encoder memberlist peers use — in three
-// ways, then writes golden vectors for Mori's own tests:
+// Command oracle checks internal/wire against the codec memberlist peers
+// use — github.com/hashicorp/go-msgpack/v2 with a default MsgpackHandle —
+// and regenerates ../golden.json, the vectors internal/wire's tests use.
+// It lives under testdata so the go command ignores it: it is a separate
+// module, and the only place Mori depends on go-msgpack.
 //
-//  1. Encoding: for boundary-biased random values of every message type,
-//     internal/wire's bytes equal go-msgpack's bytes.
+// For boundary-biased random values of every message type it checks:
+//
+//  1. Encoding: internal/wire's bytes equal go-msgpack's bytes.
 //  2. Decoding: both codecs decode go-msgpack's bytes to equal values.
 //  3. Tolerance: for alternative encodings of the same message (other
 //     integer widths, str8/bin families, shuffled keys, unknown keys with
 //     nested values, duplicate keys, nil values), both codecs agree: equal
 //     values, or both refuse.
 //
-// Usage (from this directory): go run . [-n 20000] [-seed 1] [-golden path]
+// Usage, from this directory:
+//
+//	go run . [-n 20000] [-seed 1] [-golden ../golden.json]
+//
+// Run it after any change to internal/wire or internal/msgpack; a mismatch
+// exits non-zero. Pass -golden /dev/null to check without rewriting.
 package main
 
 import (
@@ -332,7 +339,7 @@ type golden struct {
 func main() {
 	n := flag.Int("n", 20000, "random messages per type")
 	seed := flag.Uint64("seed", 1, "random seed")
-	goldenPath := flag.String("golden", "../../../internal/wire/testdata/golden.json", "golden vector output")
+	goldenPath := flag.String("golden", "../golden.json", "golden vector output")
 	flag.Parse()
 
 	g := &gen{rand.New(rand.NewPCG(*seed, *seed^0x9e3779b97f4a7c15))}
@@ -422,11 +429,22 @@ func main() {
 		fmt.Printf("FAILED: %d mismatches\n", failures)
 		os.Exit(1)
 	}
-	out, err := json.MarshalIndent(goldens, "", " ")
-	if err != nil {
-		panic(err)
+	// One vector per line: compact and reviewable in diffs.
+	var out []byte
+	for i, g := range goldens {
+		line, err := json.Marshal(g)
+		if err != nil {
+			panic(err)
+		}
+		if i == 0 {
+			out = append(out, "[\n"...)
+		} else {
+			out = append(out, ",\n"...)
+		}
+		out = append(out, line...)
 	}
-	if err := os.WriteFile(*goldenPath, append(out, '\n'), 0o644); err != nil {
+	out = append(out, "\n]\n"...)
+	if err := os.WriteFile(*goldenPath, out, 0o644); err != nil {
 		panic(err)
 	}
 	fmt.Printf("PASS: %d vectors written to %s\n", len(goldens), *goldenPath)

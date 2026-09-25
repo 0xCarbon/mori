@@ -1,3 +1,0 @@
-    zz_diff_test.go:12: go-sockaddr="192.168.2.237" (<nil>) new=192.168.2.237 (<nil>)
---- PASS: TestZZSockaddrDifferential (0.02s)
-PASS

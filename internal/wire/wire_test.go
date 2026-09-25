@@ -61,7 +61,7 @@ type golden struct {
 }
 
 // loadGolden reads the vectors captured from go-msgpack by
-// project/evidence/w5-wire (the independent oracle).
+// testdata/oracle (the independent oracle, which runs go-msgpack).
 func loadGolden(t testing.TB) []golden {
 	data, err := os.ReadFile("testdata/golden.json")
 	if err != nil {

@@ -13,14 +13,13 @@ GO ?= go
 GOLANGCI_LINT ?= golangci-lint
 GO_MODERNIZE ?= go-modernize
 
-# Maintained Go sources. project/evidence holds frozen nested modules whose
-# bytes are receipts and are never reformatted.
-GO_FILES = $(shell find . -name '*.go' -not -path './.git/*' -not -path './project/evidence/*' -not -path './dist/*')
+# Maintained Go sources, including testdata tools.
+GO_FILES = $(shell find . -name '*.go' -not -path './.git/*' -not -path './dist/*')
 
 # Cross targets are compiled and vetted; tests execute on the host only.
 CROSS_TARGETS := linux/386 linux/arm64 darwin/arm64 windows/amd64 freebsd/amd64
 
-.PHONY: bench-smoke test-386 ci check fmt fmt-check fix modernize-check vet lint build cross check-deps test race integ subnet cov bench fuzz-smoke modernize tidy-check help
+.PHONY: oracle bench-smoke test-386 ci check fmt fmt-check fix modernize-check vet lint build cross check-deps test race integ subnet cov bench fuzz-smoke modernize tidy-check help
 
 help:
 	@echo "make ci           all gates: fmt, modernize, vet, lint, build, cross, deps, tidy, test, 386 test, race, bench-smoke"
@@ -31,6 +30,7 @@ help:
 	@echo "make fuzz-smoke   short fuzz run of every fuzz target"
 	@echo "make modernize    optional: golang-modernization skill gate (go-modernize on PATH)"
 	@echo "make fix          apply go fix modernizations and gofmt"
+	@echo "make oracle       check internal/wire against go-msgpack; regenerate golden vectors"
 
 ci: check tidy-check test test-386 race bench-smoke
 
@@ -96,8 +96,8 @@ cov:
 	$(GO) test -count=1 -coverprofile=dist/coverage.out ./...
 	$(GO) tool cover -func=dist/coverage.out | tail -1
 
-# Benchmarks are Tier-1 smoke unless run interleaved on a quiet host; see
-# project/goal.md for the evidence rules.
+# Benchmarks are indicative unless run interleaved against a baseline on a
+# quiet host (see AGENTS.md); compare runs with go run ./tools/benchcmp.
 BENCH ?= .
 BENCH_COUNT ?= 10
 # Every benchmark once, so they cannot rot between measurement campaigns.
@@ -119,6 +119,11 @@ fuzz-smoke:
 		done; \
 	done; \
 	if [ $$found = 0 ]; then echo "ERROR: no fuzz targets found"; exit 1; fi
+
+# Re-check internal/wire against go-msgpack and regenerate its golden
+# vectors (a separate module under testdata; needs network for go-msgpack).
+oracle:
+	cd internal/wire/testdata/oracle && $(GO) run . -n 20000
 
 # Optional local gate from the golang-modernization skill: go fix plus
 # golangci-lint v2, reported as findings without applying fixes.

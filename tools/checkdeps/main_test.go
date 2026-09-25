@@ -125,12 +125,12 @@ func TestSourcePolicy(t *testing.T) {
 	}
 
 	root := writeTree(t, map[string]string{
-		"go.mod":                    testModFile,
-		"a.go":                      "package example\n// import \"unsafe\" is only a comment\n",
-		"project/evidence/p/p.go":   "package p\nimport \"unsafe\"\nvar _ = unsafe.Sizeof(0)\n",
-		"project/evidence/p/go.mod": "module github.com/0xCarbon/example/project/evidence/p\n\ngo 1.27\n\nrequire github.com/hashicorp/go-msgpack/v2 v2.1.5\n",
+		"go.mod":              testModFile,
+		"a.go":                "package example\n// import \"unsafe\" is only a comment\n",
+		"x/testdata/p/p.go":   "package p\nimport \"unsafe\"\nvar _ = unsafe.Sizeof(0)\n",
+		"x/testdata/p/go.mod": "module github.com/0xCarbon/example/x/testdata/p\n\ngo 1.27\n\nrequire github.com/hashicorp/go-msgpack/v2 v2.1.5\n",
 	})
 	if err := audit(root); err != nil {
-		t.Fatalf("frozen evidence or a comment was refused: %v", err)
+		t.Fatalf("a testdata module or a comment was refused: %v", err)
 	}
 }

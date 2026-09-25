@@ -1,4 +1,0 @@
-    net_test.go:1394: memberlist.size.local = 2.2085821e+09, want the 111 bytes sent
-FAIL
-FAIL	github.com/0xCarbon/mori	0.003s
-FAIL

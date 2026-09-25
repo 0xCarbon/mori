@@ -10,8 +10,7 @@ compatible with memberlist peers; the Go API is Mori's own.
 
 ## Authority
 
-Owner instructions, then this file, then [project/goal.md](project/goal.md)
-(current plan and decisions), then [CHANGELOG.md](CHANGELOG.md) (the
+Owner instructions, then this file, then [CHANGELOG.md](CHANGELOG.md) (the
 behavioral contract per release), then code comments.
 
 ## Toolchain and dependencies
@@ -24,8 +23,9 @@ behavioral contract per release), then code comments.
   lives in its own module under `tools/` and may use only official
   `golang.org/x/` or `github.com/0xCarbon/` modules, with a written reason
   the standard library is insufficient. `make check-deps` enforces this.
-  Frozen evidence modules under `project/evidence/` may pin whatever they
-  compare against (for example go-msgpack) and are never built by `make`.
+  Modules under a `testdata/` directory (ignored by the go command) may pin
+  what they compare against: `internal/wire/testdata/oracle` runs
+  go-msgpack.
 - No project-authored `unsafe`, assembly or object files.
 - `make ci` passes before every commit. It runs gofmt, `go fix -diff`
   (modernizers), vet, golangci-lint (`.golangci.yml`), build, cross builds,
@@ -38,8 +38,9 @@ behavioral contract per release), then code comments.
   with go-msgpack v2 `MsgpackHandle{}` output: structs as maps keyed by field
   name with entries sorted by name, legacy raw strings (no str8/bin), nil
   byte slices as nil. Message type numbers are append-only.
-- Changes to encoding are proven against captured go-msgpack vectors, never
-  against the new code itself.
+- Changes to encoding are proven against go-msgpack, never against the new
+  code itself: run `make oracle` (the go-msgpack differential, which also
+  regenerates `internal/wire/testdata/golden.json`).
 - Every length or count read from the network is bounded before it sizes an
   allocation, and every decoder refuses (never panics on) malformed input.
 
@@ -47,15 +48,16 @@ behavioral contract per release), then code comments.
 
 - **RED before GREEN.** A fix starts with a test that fails on the baseline
   for the intended reason (wrong value, error identity, allocation or panic),
-  never a missing symbol. Keep the failing output as a receipt under
-  `project/evidence/<wave or issue>/`.
+  never a missing symbol. Put the failing output in the pull request
+  description.
 - **Independent oracles** for correctness (go-msgpack vectors, RFC tables,
   hand-derived values).
 - **Fast paths never own semantics.** An optimized path returns only what
   the general path would, and differential tests pin the two together.
 - **Evidence-based performance.** A performance claim needs interleaved A/B
-  runs (at least 8+8) compared with `go run ./tools/benchcmp`; keep the
-  command, Go version, CPU and raw output under `project/evidence/`.
+  runs (at least 8+8) compared with `go run ./tools/benchcmp`; put the
+  command, Go version, CPU and results in the pull request description.
+  Raw run outputs, plans and one-off harnesses do not belong in the tree.
 - Tests use the standard `testing` package. Timer-driven protocol logic is
   tested inside `testing/synctest` bubbles with in-memory transports; real
   network tests are reserved for the transport itself.
@@ -65,9 +67,9 @@ behavioral contract per release), then code comments.
 | Path | Contents |
 | --- | --- |
 | `/` | package `mori`: files named by subject, one `_test.go` per file, plus shared test infrastructure named by subject (`helpers_test.go`, `simnet_test.go`, `fuzz_test.go`) |
-| `internal/` | packages with a named seam (see project/goal.md decisions) |
+| `internal/` | `msgpack` (format) and `wire` (protocol messages, with the go-msgpack oracle under `testdata/`) |
 | `tools/` | development tools (`checkdeps`, `benchcmp`) |
-| `project/` | plan, decisions, evidence; never at the root |
+| `benchmarks/` | public-API benchmarks |
 
 ## Delivery
 

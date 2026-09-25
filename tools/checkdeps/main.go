@@ -13,8 +13,9 @@
 //   - No project-authored unsafe or cgo imports, assembly, object or
 //     cgo source files.
 //
-// Frozen evidence under project/evidence/ (nested modules that pin the
-// implementations being compared) is not maintained source and is skipped.
+// testdata directories are skipped, as the go command skips them: they may
+// hold nested modules that pin the implementations Mori is checked against
+// (internal/wire/testdata/oracle runs go-msgpack).
 //
 // Usage: go run ./tools/checkdeps (from the repository root).
 package main
@@ -141,8 +142,7 @@ func walk(root string) (toolModules []string, err error) {
 		}
 		slash := filepath.ToSlash(rel)
 		if d.IsDir() {
-			switch slash {
-			case ".git", "project/evidence", "dist":
+			if slash == ".git" || slash == "dist" || d.Name() == "testdata" {
 				return filepath.SkipDir
 			}
 			return nil

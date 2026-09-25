@@ -22,8 +22,8 @@ consumers on older toolchains must raise their `go` directive to adopt it.
 ### Improvements
 
 * Performance, compared with the code before this release (two interleaved
-  A/B phases, chained where both apply; go1.27.1; details and raw data in
-  `project/evidence/w7-perf`): handling an alive message −84%
+  A/B phases, chained where both apply; go1.27.1; method and results in
+  pull request #22): handling an alive message −84%
   time and 50 → 10 allocations; merging a 1,000-node push/pull state −76%;
   handling a ping −96% overall (LZW coders are pooled and packets of at
   most 22 bytes, which LZW provably cannot shrink, skip compression);
@@ -35,8 +35,7 @@ consumers on older toolchains must raise their `go` directive to adopt it.
   `github.com/hashicorp/go-msgpack/v2`. The encoding is byte-for-byte what
   go-msgpack's default handle produces, proven by a differential oracle
   (21.6 M randomized agreements across encoding, decoding and alternative
-  encodings) and 144 captured golden vectors
-  (`project/evidence/w5-wire`). Decoding never panics, checks every length
+  encodings; `make oracle`) and 144 captured golden vectors. Decoding never panics, checks every length
   against the remaining input (packets) or grows buffers with the bytes
   received (streams), bounds field sizes (1 MiB; 64 MiB for compressed
   payloads) and container nesting, and allocates only for non-empty string
@@ -145,8 +144,8 @@ consumers on older toolchains must raise their `go` directive to adopt it.
   input bound Mori enforces. Fuzz targets cover the whole packet path
   (plaintext and encrypted, through the live state machine), the stream
   path including push/pull merge, the message decoders and the MessagePack
-  decoder; `make fuzz-smoke` runs them in CI. The receipt in
-  `project/evidence/w8-review/fuzz.txt` records the executions run.
+  decoder; `make fuzz-smoke` runs them in CI (76.4M executions without a
+  failure while preparing this release).
 
 Ports the four upstream hashicorp/memberlist fixes released after the fork
 point, and closes further instances of the same classes found while

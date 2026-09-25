@@ -41,8 +41,9 @@ memberlist (see the [CHANGELOG](CHANGELOG.md) for exact semantics):
 * **No dependencies.** The module requires nothing but the Go standard
   library (Go 1.27.1): no go-msgpack, go-metrics, go-sockaddr, miekg/dns,
   btree or testify. It owns its MessagePack codec, byte-for-byte compatible
-  with go-msgpack (proven by golden vectors, a randomized differential and
-  mixed-version clusters against v0.7.0; see `project/evidence/`).
+  with go-msgpack (proven by golden vectors, a randomized differential run
+  by `make oracle`, and mixed-version clusters against v0.7.0; see the
+  v0.8.0 pull request, #22).
 * **Hardened input handling.** Every length or count from the network is
   bounded before it can size an allocation, decoders never panic, and the
   packet and stream paths are fuzzed end to end. See
@@ -53,7 +54,7 @@ memberlist (see the [CHANGELOG](CHANGELOG.md) for exact semantics):
 * **Performance.** Handling an alive message is 6× faster with 5× fewer
   allocations than before this release; compressed and encrypted packets reuse pooled LZW coders
   and cached AES-GCM ciphers; the UDP listener no longer allocates 64 KiB per
-  datagram (measurements in `project/evidence/w7-perf`).
+  datagram (measurements in pull request #22).
 * **Configurable node-meta cap** — `Config.MetaMaxSize` sets the producer-side
   limit (bytes) on `Delegate.NodeMeta`, validated fail-fast against the
   transport packet budget at `Create`; oversized meta returns `ErrMetaTooLarge`
