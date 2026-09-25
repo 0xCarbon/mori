@@ -504,7 +504,7 @@ func (m *Memberlist) resolveAddr(hostStr string) ([]ipPort, error) {
 	// IPv6 addresses.
 	if ip := net.ParseIP(host); ip != nil {
 		return []ipPort{
-			ipPort{ip: ip, port: port, nodeName: nodeName},
+			{ip: ip, port: port, nodeName: nodeName},
 		}, nil
 	}
 
@@ -550,7 +550,7 @@ func (m *Memberlist) setAlive(receipt *eventReceipt) error {
 		return fmt.Errorf("failed to parse interface addresses: %v", err)
 	}
 	ifAddrs := []sockaddr.IfAddr{
-		sockaddr.IfAddr{
+		{
 			SockAddr: ipAddr,
 		},
 	}

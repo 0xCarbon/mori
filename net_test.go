@@ -518,11 +518,9 @@ func TestTCPPushPull(t *testing.T) {
 	}()
 
 	m.nodes = append(m.nodes, &nodeState{
-		Node: Node{
-			Name: "Test 0",
-			Addr: net.ParseIP(m.config.BindAddr),
-			Port: uint16(m.config.BindPort),
-		},
+		Name:        "Test 0",
+		Addr:        net.ParseIP(m.config.BindAddr),
+		Port:        uint16(m.config.BindPort),
 		Incarnation: 0,
 		State:       StateSuspect,
 		StateChange: time.Now().Add(-1 * time.Second),
@@ -556,8 +554,8 @@ func TestTCPPushPull(t *testing.T) {
 
 	// Send our node state
 	header := pushPullHeader{Nodes: 3}
-	hd := codec.MsgpackHandle{}
-	hd.TimeNotBuiltin = !m.config.MsgpackUseNewTimeFormat
+	hd := codec.MsgpackHandle{
+		TimeNotBuiltin: !m.config.MsgpackUseNewTimeFormat}
 
 	enc := codec.NewEncoder(conn, &hd)
 
@@ -580,8 +578,8 @@ func TestTCPPushPull(t *testing.T) {
 	}
 
 	var bufConn io.Reader = conn
-	msghd := codec.MsgpackHandle{}
-	msghd.TimeNotBuiltin = !m.config.MsgpackUseNewTimeFormat
+	msghd := codec.MsgpackHandle{
+		TimeNotBuiltin: !m.config.MsgpackUseNewTimeFormat}
 
 	dec := codec.NewDecoder(bufConn, &msghd)
 
@@ -845,7 +843,7 @@ func TestRawSendUdp_CRC(t *testing.T) {
 
 	// Register a node with PMax >= 5 to be looked up, should result in a checksum
 	m.nodeMap["127.0.0.1"] = &nodeState{
-		Node: Node{PMax: 5},
+		PMax: 5,
 	}
 	if err := m.rawSendMsgPacket(a, nil, payload); err != nil {
 		t.Fatal(err)

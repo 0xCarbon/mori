@@ -67,8 +67,8 @@ func decode(buf []byte, out any) error {
 func encode(msgType messageType, in any, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
 	buf := bytes.NewBuffer(nil)
 	buf.WriteByte(uint8(msgType))
-	hd := codec.MsgpackHandle{}
-	hd.TimeNotBuiltin = !msgpackUseNewTimeFormat
+	hd := codec.MsgpackHandle{
+		TimeNotBuiltin: !msgpackUseNewTimeFormat}
 
 	enc := codec.NewEncoder(buf, &hd)
 	err := enc.Encode(in)

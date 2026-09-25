@@ -1,0 +1,33 @@
+# Transition allowlist for tools/checkdeps (see project/goal.md).
+# Format: <module path> <reason: the wave that removes it>.
+# A ratchet: checkdeps fails when an entry is no longer required. The goal is
+# an empty file; then delete it.
+
+# W3 — small dependencies
+github.com/hashicorp/go-multierror   W3: errors.Join
+github.com/hashicorp/errwrap         W3: indirect via go-multierror
+github.com/sean-/seed                W3: global rand is auto-seeded since Go 1.20
+github.com/hashicorp/go-sockaddr     W3: net/netip + RFC 6890 table
+github.com/miekg/dns                 W3: net.Resolver over TCP
+golang.org/x/mod                     W3: indirect via miekg/dns
+golang.org/x/net                     W3: indirect via miekg/dns
+golang.org/x/sync                    W3: indirect via miekg/dns
+golang.org/x/sys                     W3: indirect via miekg/dns
+golang.org/x/tools                   W3: indirect via miekg/dns
+github.com/google/btree              W3: owned ordered queue
+
+# W4 — telemetry
+github.com/hashicorp/go-metrics      W4: Config.Metrics sink
+github.com/armon/go-metrics          W4: indirect via go-metrics
+github.com/hashicorp/go-immutable-radix W4: indirect via go-metrics
+github.com/hashicorp/golang-lru      W4: indirect via go-metrics
+
+# W5 — wire codec
+github.com/hashicorp/go-msgpack/v2   W5: internal/msgpack + internal/wire
+
+# W6 — tests
+github.com/stretchr/testify          W6: std testing
+github.com/davecgh/go-spew           W6: indirect via testify
+github.com/pmezard/go-difflib        W6: indirect via testify
+gopkg.in/yaml.v3                     W6: indirect via testify
+go.uber.org/goleak                   W6: testing/synctest and a goroutine audit

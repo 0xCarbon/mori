@@ -2212,25 +2212,25 @@ func TestMemberList_MergeState(t *testing.T) {
 	m.suspectNode(&s)
 
 	remote := []pushNodeState{
-		pushNodeState{
+		{
 			Name:        "test1",
 			Addr:        []byte{127, 0, 0, 1},
 			Incarnation: 2,
 			State:       StateAlive,
 		},
-		pushNodeState{
+		{
 			Name:        "test2",
 			Addr:        []byte{127, 0, 0, 2},
 			Incarnation: 1,
 			State:       StateSuspect,
 		},
-		pushNodeState{
+		{
 			Name:        "test3",
 			Addr:        []byte{127, 0, 0, 3},
 			Incarnation: 1,
 			State:       StateDead,
 		},
-		pushNodeState{
+		{
 			Name:        "test4",
 			Addr:        []byte{127, 0, 0, 4},
 			Incarnation: 2,
@@ -2620,14 +2620,12 @@ func testVerifyProtocolSingle(t *testing.T, A [][6]uint8, B [][6]uint8, expect b
 	m.nodes = make([]*nodeState, len(A))
 	for i, n := range A {
 		m.nodes[i] = &nodeState{
-			Node: Node{
-				PMin: n[0],
-				PMax: n[1],
-				PCur: n[2],
-				DMin: n[3],
-				DMax: n[4],
-				DCur: n[5],
-			},
+			PMin: n[0],
+			PMax: n[1],
+			PCur: n[2],
+			DMin: n[3],
+			DMax: n[4],
+			DCur: n[5],
 		}
 	}
 

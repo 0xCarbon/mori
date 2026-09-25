@@ -1066,12 +1066,10 @@ func (m *Memberlist) aliveNodeLocked(a *alive, notify chan struct{}, bootstrap b
 			return
 		}
 		state = &nodeState{
-			Node: Node{
-				Name: a.Node,
-				Addr: a.Addr,
-				Port: a.Port,
-				Meta: a.Meta,
-			},
+			Name:  a.Node,
+			Addr:  a.Addr,
+			Port:  a.Port,
+			Meta:  a.Meta,
 			State: StateDead,
 		}
 		if hasVsn {

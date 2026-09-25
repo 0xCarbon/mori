@@ -648,8 +648,8 @@ func TestMemberList_ResolveAddr_TCP_First(t *testing.T) {
 			// IP.String converts IP4-mapped addresses back to dotted decimal notation
 			// but the underlying IP bytes don't compare as equal to the actual IPv4
 			// bytes the resolver will get from DNS.
-			ipPort{ip: net.ParseIP("127.0.0.1").To4(), port: port, nodeName: ""},
-			ipPort{ip: net.ParseIP("2001:db8:a0b:12f0::1"), port: port, nodeName: ""},
+			{ip: net.ParseIP("127.0.0.1").To4(), port: port, nodeName: ""},
+			{ip: net.ParseIP("2001:db8:a0b:12f0::1"), port: port, nodeName: ""},
 		}
 		require.Equal(t, expected, ips)
 	}
@@ -662,9 +662,9 @@ func TestMemberList_Members(t *testing.T) {
 
 	m := &Memberlist{}
 	nodes := []*nodeState{
-		&nodeState{Node: *n1, State: StateAlive},
-		&nodeState{Node: *n2, State: StateDead},
-		&nodeState{Node: *n3, State: StateSuspect},
+		{Node: *n1, State: StateAlive},
+		{Node: *n2, State: StateDead},
+		{Node: *n3, State: StateSuspect},
 	}
 	m.nodes = nodes
 

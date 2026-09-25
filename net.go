@@ -984,8 +984,8 @@ func (m *Memberlist) sendUserMsg(a Address, sendBuf []byte) error {
 	}
 
 	header := userMsgHeader{UserMsgLen: len(sendBuf)}
-	hd := codec.MsgpackHandle{}
-	hd.TimeNotBuiltin = !m.config.MsgpackUseNewTimeFormat
+	hd := codec.MsgpackHandle{
+		TimeNotBuiltin: !m.config.MsgpackUseNewTimeFormat}
 
 	enc := codec.NewEncoder(bufConn, &hd)
 	if err := enc.Encode(&header); err != nil {

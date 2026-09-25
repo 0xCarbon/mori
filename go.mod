@@ -1,6 +1,6 @@
 module github.com/0xCarbon/mori
 
-go 1.25.0
+go 1.27.1
 
 require (
 	github.com/google/btree v1.1.3

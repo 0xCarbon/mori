@@ -53,7 +53,7 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
 | --- | --- | --- |
 | W0 | Goal doc, branch, baseline measurements | done |
 | W1 | Upstream security fixes (#361 #363 #368 #369) + local hardening of the same classes | done |
-| W2 | Tooling: go 1.27.1, Makefile `ci`, `tools/checkdeps`, `tools/benchcmp`, CI workflow, AGENTS.md | pending |
+| W2 | Tooling: go 1.27.1, Makefile `ci`, `tools/checkdeps`, `tools/benchcmp`, CI workflow, AGENTS.md | done |
 | W3 | Small deps: go-multierror, sean-/seed, go-sockaddr, miekg/dns, google/btree | pending |
 | W4 | Telemetry: `Config.Metrics` sink replaces go-metrics; `log/slog` replaces `log` | pending |
 | W5 | Wire codec: `internal/msgpack` + `internal/wire`, golden vectors, differential evidence; drop go-msgpack | pending |
@@ -90,3 +90,15 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
   all GREEN; full suite passes; go-modernize 0/0. Found beyond upstream:
   header-count preallocation (117 MB from a 10-byte header), unbounded
   plaintext streams, nested envelopes, PKCS7 pad panic.
+- 2026-09-25 W2: go 1.27.1; `make ci` green (fmt, go fix -diff, vet,
+  golangci-lint 2.13.2/go1.27.1, build, cross x5, checkdeps with 21-entry
+  ratchet in project/deps-transition.txt, tidy -diff, test, race). go fix
+  modernizers applied after review. Fixed a 32-bit test overflow found by
+  the new 386 cross vet.
+
+## Findings to fix (discovered during the waves)
+
+- F1 (W3): `nodeState.State` shadows the embedded `Node.State`, so the
+  `Node` values handed to users (`Members`, `LocalNode`, event callbacks)
+  always report `StateAlive`, even in `NotifyLeave`. Inherited from
+  upstream. Fix: single `State` field on `Node`.
