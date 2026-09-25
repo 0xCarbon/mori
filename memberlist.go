@@ -55,7 +55,7 @@ var (
 	// receivers accept: a SendReliable message above 20 MiB, or, with
 	// encryption, any stream message whose ciphertext would exceed 20 MiB
 	// (for example a large push/pull state).
-	ErrMessageTooLarge = errors.New("memberlist: message exceeds the stream user message limit")
+	ErrMessageTooLarge = errors.New("memberlist: stream message exceeds the size receivers accept")
 
 	// ErrLeft is returned by UpdateNode/UpdateNodeContext after the node
 	// has left the cluster: the update can never be broadcast, because

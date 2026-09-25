@@ -818,12 +818,13 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 // rawSendMsgStream is used to stream a message to another host without
 // modification, other than applying compression and encryption if enabled.
 func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel string) error {
-	// Check if compression is enabled
+	// Check if compression is enabled; like packets, send the compressed
+	// form only when it is smaller (LZW expands incompressible input).
 	if m.config.EnableCompression {
 		compBuf, err := compressPayload(sendBuf)
 		if err != nil {
 			m.logger.Error("failed to compress payload", "error", err)
-		} else {
+		} else if len(compBuf) < len(sendBuf) {
 			sendBuf = compBuf
 		}
 	}

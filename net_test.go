@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/0xCarbon/mori/internal/msgpack"
+
+	iretry "github.com/0xCarbon/mori/internal/retry"
 )
 
 // As a regression we left this test very low-level and network-ey, even after
@@ -1469,7 +1471,10 @@ func TestReadStreamOversizedDeclaredFields(t *testing.T) {
 
 // TestEncryptedStreamSenderLimit: receivers refuse encrypted stream
 // messages whose ciphertext exceeds maxPushStateBytes, so senders must fail
-// with ErrMessageTooLarge rather than send something that is dropped.
+// with ErrMessageTooLarge rather than send something that is dropped. The
+// boundary is exact: the largest user message whose stream (type byte,
+// header, payload) encrypts to maxPushStateBytes is delivered, one byte
+// more is refused.
 func TestEncryptedStreamSenderLimit(t *testing.T) {
 	n := &MockNetwork{}
 	key := []byte("0123456789abcdef")
@@ -1479,15 +1484,124 @@ func TestEncryptedStreamSenderLimit(t *testing.T) {
 		c.EnableCompression = false
 	})
 	t.Cleanup(func() { _ = m1.Shutdown() })
+	d2 := &MockDelegate{}
 	m2 := GetMemberlist(t, func(c *Config) {
 		c.Transport = n.NewTransport("node2")
 		c.SecretKey = key
+		c.Delegate = d2
 	})
 	t.Cleanup(func() { _ = m2.Shutdown() })
 
-	// A 20 MiB user message passes the plaintext limit, but its ciphertext
-	// (plus the stream header) is above what receivers accept.
+	// The stream around a user message of length L is 1 type byte plus the
+	// encoded header; its ciphertext is encryptedLength of that total.
+	streamLen := func(l int) int { return len(userMsgHeader{UserMsgLen: l}.AppendMsgpack([]byte{byte(userMsg)})) + l }
+	largest := maxPushStateBytes - encryptedLength(m1.encryptionVersion(), streamLen(0))
+	for encryptedLength(m1.encryptionVersion(), streamLen(largest)) > maxPushStateBytes {
+		largest--
+	}
+	equal(t, maxPushStateBytes, encryptedLength(m1.encryptionVersion(), streamLen(largest)), "boundary derivation")
+
 	to := &Node{Name: "node2", Addr: net.ParseIP("127.0.0.2"), Port: 1}
-	errIs(t, m1.SendReliable(to, make([]byte, maxUserMsgBytes)), ErrMessageTooLarge)
-	noErr(t, m1.SendReliable(to, make([]byte, maxUserMsgBytes-1024)), "a message within the encrypted limit")
+	errIs(t, m1.SendReliable(to, make([]byte, largest+1)), ErrMessageTooLarge)
+	noErr(t, m1.SendReliable(to, make([]byte, largest)), "the largest message within the encrypted limit")
+	iretry.Run(t, func(r *iretry.R) {
+		msgs := d2.getMessages()
+		if len(msgs) != 1 || len(msgs[0]) != largest {
+			r.Fatalf("receiver got %d messages, want one of %d bytes", len(msgs), largest)
+		}
+	})
+}
+
+// TestReadStreamPlaintextCapEdge: a plaintext stream message of exactly
+// maxStreamMessageBytes (type byte included) is accepted; one byte more is
+// refused.
+func TestReadStreamPlaintextCapEdge(t *testing.T) {
+	if raceDetector {
+		t.Skip("single-goroutine size check; two 40 MiB streams are slow under the race detector")
+	}
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Transport = (&MockNetwork{}).NewTransport("node")
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	// A push/pull with a full user state and one node whose meta pads the
+	// message to the target size (meta stays within wire.MaxFieldBytes by
+	// spreading it over several nodes).
+	build := func(total int) []byte {
+		const nodes = 24
+		fixed := func(meta int) int {
+			b := pushPullHeader{Nodes: nodes, UserStateLen: maxPushStateBytes}.AppendMsgpack([]byte{byte(pushPullMsg)})
+			for i := range nodes {
+				b = pushNodeState{Name: fmt.Sprintf("n%02d", i), Addr: []byte{10, 0, 0, 1}, Port: 7946, Meta: make([]byte, meta), Incarnation: 1, Vsn: []uint8{1, 5, 2, 0, 0, 0}}.AppendMsgpack(b)
+			}
+			return len(b) + maxPushStateBytes
+		}
+		meta := (total - fixed(0)) / nodes
+		for fixed(meta) > total {
+			meta--
+		}
+		b := pushPullHeader{Nodes: nodes, UserStateLen: maxPushStateBytes}.AppendMsgpack([]byte{byte(pushPullMsg)})
+		extra := total - fixed(meta) // the remainder goes to the last node
+		for i := range nodes {
+			l := meta
+			if i == nodes-1 {
+				l += extra
+			}
+			b = pushNodeState{Name: fmt.Sprintf("n%02d", i), Addr: []byte{10, 0, 0, 1}, Port: 7946, Meta: make([]byte, l), Incarnation: 1, Vsn: []uint8{1, 5, 2, 0, 0, 0}}.AppendMsgpack(b)
+		}
+		return append(b, make([]byte, maxPushStateBytes)...)
+	}
+	for _, tc := range []struct {
+		total int
+		ok    bool
+	}{{maxStreamMessageBytes, true}, {maxStreamMessageBytes + 1, false}} {
+		stream := build(tc.total)
+		equal(t, tc.total, len(stream), "test stream size")
+		_, dec, err := m.readStream(streamFrom(t, stream), "")
+		noErr(t, err)
+		_, _, _, err = m.readRemoteState(dec)
+		if (err == nil) != tc.ok {
+			t.Fatalf("%d-byte plaintext message: error %v, want accepted=%v", tc.total, err, tc.ok)
+		}
+	}
+}
+
+// TestStreamCompressionOnlyWhenSmaller: like packets, stream messages go
+// out compressed only when that makes them smaller.
+func TestStreamCompressionOnlyWhenSmaller(t *testing.T) {
+	m := GetMemberlist(t, func(c *Config) {
+		c.Transport = (&MockNetwork{}).NewTransport("node")
+		c.EnableCompression = true
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	r := rand.New(rand.NewPCG(5, 6))
+	random := make([]byte, 4096)
+	for i := range random {
+		random[i] = byte(r.Uint32())
+	}
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+		want    messageType
+	}{
+		{"incompressible", random, userMsg},
+		{"compressible", make([]byte, 4096), compressMsg},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := append(userMsgHeader{UserMsgLen: len(tc.payload)}.AppendMsgpack([]byte{byte(userMsg)}), tc.payload...)
+			local, remote := net.Pipe()
+			got := make(chan []byte, 1)
+			go func() {
+				b, _ := io.ReadAll(remote)
+				got <- b
+			}()
+			noErr(t, m.rawSendMsgStream(local, msg, ""))
+			_ = local.Close()
+			sent := <-got
+			equal(t, tc.want, messageType(sent[0]))
+			lessOrEqual(t, len(sent), len(msg), "sent size")
+		})
+	}
 }

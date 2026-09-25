@@ -17,6 +17,11 @@
   states from about 28 to 40 MiB with incompressible content. Plaintext
   stream messages keep the 40 MiB cap. Encrypted stream messages remain
   limited to 20 MiB of ciphertext, as upstream.
+* Stream messages are sent compressed only when that makes them smaller,
+  as packets already were. Incompressible push/pull states no longer grow
+  by up to 1.4x on the wire (which, with encryption, could push a state
+  that fits uncompressed over the 20 MiB ciphertext limit). Wire
+  compatible: receivers accept both forms.
 * Senders now refuse, with `ErrMessageTooLarge`, an encrypted stream message
   (push/pull state or `SendReliable`) whose ciphertext exceeds the 20 MiB
   receivers accept; before, the receiver dropped it with an error only it
@@ -24,9 +29,9 @@
 
 ### Security
 
-* Regression tests for issue #21: a stream whose compressed buffer or node
-  field declares a multi-gigabyte length but carries a few bytes is refused
-  without allocating the declared size.
+* Regression tests for issue #21: a stream whose compressed buffer (60 MiB)
+  or node meta (1 MiB) declares a length within the field limits but
+  carries 1 KiB is refused without allocating the declared size.
 
 ## v0.8.0 (Mori)
 
