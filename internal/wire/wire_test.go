@@ -7,9 +7,11 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/0xCarbon/mori/internal/msgpack"
@@ -100,6 +102,15 @@ func TestGoldenVectors(t *testing.T) {
 		}
 		m := newMessage(t, v.Type)
 		if err := json.Unmarshal(v.Value, m); err != nil {
+			// On 32-bit platforms an int field cannot hold every vector's
+			// value; the decoder must then refuse it instead of wrapping.
+			var typeErr *json.UnmarshalTypeError
+			if strconv.IntSize == 32 && errors.As(err, &typeErr) {
+				if newMessage(t, v.Type).DecodeMsgpack(msgpack.NewDecoder(want)) == nil {
+					t.Fatalf("vector %d (%s): value out of int range decoded", i, v.Type)
+				}
+				continue
+			}
 			t.Fatalf("vector %d: %v", i, err)
 		}
 		if got := m.AppendMsgpack(nil); !bytes.Equal(got, want) {
@@ -121,6 +132,9 @@ func TestEncodedKeysSorted(t *testing.T) {
 	for _, v := range loadGolden(t) {
 		m := newMessage(t, v.Type)
 		if err := json.Unmarshal(v.Value, m); err != nil {
+			if strconv.IntSize == 32 {
+				continue // value out of int range; see TestGoldenVectors
+			}
 			t.Fatal(err)
 		}
 		d := msgpack.NewDecoder(m.AppendMsgpack(nil))

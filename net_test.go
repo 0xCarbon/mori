@@ -1335,3 +1335,41 @@ func TestSizeLocalGaugeIsMessageSize(t *testing.T) {
 		t.Fatalf("memberlist.size.local = %v, want the %d bytes sent", got, n)
 	}
 }
+
+// TestReadRemoteStateRefusesNamelessStates: a node state without a name is
+// meaningless, and accepting it let each 1-byte nil (0xc0) in a push/pull
+// stream decode to a full node state (over 100 bytes of memory per input
+// byte). The first nameless state fails the exchange.
+func TestReadRemoteStateRefusesNamelessStates(t *testing.T) {
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Transport = (&MockNetwork{}).NewTransport("node")
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	const n = 1 << 16
+	stream := pushPullHeader{Nodes: n}.AppendMsgpack([]byte{byte(pushPullMsg)})
+	stream = append(stream, bytes.Repeat([]byte{0xc0}, n)...)
+	var readErr error
+	alloc := allocatedBytes(func() {
+		_, dec, err := m.readStream(streamFrom(t, stream), "")
+		noErr(t, err)
+		_, _, _, readErr = m.readRemoteState(dec)
+	})
+	isErr(t, readErr, "nameless node states accepted")
+	lessOrEqual(t, alloc, uint64(1<<20), "allocation for %d input bytes", len(stream))
+}
+
+// TestSendReliableRefusesOversizedMessages: receivers refuse stream user
+// messages above maxUserMsgBytes, so the sender must report the failure
+// instead of returning nil for a message that is never delivered.
+func TestSendReliableRefusesOversizedMessages(t *testing.T) {
+	n := &MockNetwork{}
+	m1 := GetMemberlist(t, func(c *Config) { c.Transport = n.NewTransport("node1") })
+	t.Cleanup(func() { _ = m1.Shutdown() })
+	m2 := GetMemberlist(t, func(c *Config) { c.Transport = n.NewTransport("node2") })
+	t.Cleanup(func() { _ = m2.Shutdown() })
+	to := &Node{Name: "node2", Addr: net.ParseIP("127.0.0.2"), Port: 1}
+	err := m1.SendReliable(to, make([]byte, maxUserMsgBytes+1))
+	isErr(t, err, "an undeliverable stream user message was reported as sent")
+}

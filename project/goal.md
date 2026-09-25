@@ -139,6 +139,12 @@ Branch: `goal/stdlib-hardening` (local; not pushed).
   seek (queue@10k -37%, 54 -> 7 allocs). Untouched paths ~. bench-smoke
   gate added to make ci.
 
+- 2026-09-25 W8a: FuzzIngestPacket/FuzzReadStream on a goroutine-free live
+  instance (buildMemberlist); ~40M execs clean; SECURITY.md, README,
+  CHANGELOG summary. go-modernize: 0/0 with repo and default configs.
+  taba check: only break is Config.LogOutput (2 lines); scratch copy with
+  the slog migration builds and vets against this tree.
+
 ## Findings to fix (discovered during the waves)
 
 - F1 (W3): `nodeState.State` shadows the embedded `Node.State`, so the

@@ -1,0 +1,21 @@
+go: go version go1.27.1 linux/amd64; tree: cc81e57 + W8b working tree; make fuzz-smoke FUZZ_TIME=60s
+==> github.com/0xCarbon/mori FuzzIngestPacket (60s)
+fuzz: elapsed: 1m0s, execs: 15870704 (256050/sec), new interesting: 70 (total: 701)
+fuzz: elapsed: 1m2s, execs: 15870704 (0/sec), new interesting: 70 (total: 701)
+PASS
+ok  	github.com/0xCarbon/mori	62.162s
+==> github.com/0xCarbon/mori FuzzReadStream (60s)
+fuzz: elapsed: 1m0s, execs: 9825167 (65524/sec), new interesting: 59 (total: 312)
+fuzz: elapsed: 1m1s, execs: 9825167 (0/sec), new interesting: 59 (total: 312)
+PASS
+ok  	github.com/0xCarbon/mori	61.182s
+==> github.com/0xCarbon/mori/internal/msgpack FuzzDecoder (60s)
+fuzz: elapsed: 1m0s, execs: 19913361 (501674/sec), new interesting: 14 (total: 162)
+fuzz: elapsed: 1m1s, execs: 19913361 (0/sec), new interesting: 14 (total: 162)
+PASS
+ok  	github.com/0xCarbon/mori/internal/msgpack	61.081s
+==> github.com/0xCarbon/mori/internal/wire FuzzDecodeMessages (60s)
+fuzz: elapsed: 1m0s, execs: 30748213 (474618/sec), new interesting: 17 (total: 325)
+fuzz: elapsed: 1m1s, execs: 30748213 (0/sec), new interesting: 17 (total: 325)
+PASS
+ok  	github.com/0xCarbon/mori/internal/wire	61.056s

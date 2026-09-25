@@ -202,9 +202,13 @@ func TestTruncatedInputs(t *testing.T) {
 }
 
 func TestMapHeaderBoundedByInput(t *testing.T) {
-	// A map32 header declaring 2^32-1 entries with no entries following.
-	if _, err := decodeHex(t, "dfffffffff").ReadMapHeader(); !errors.Is(err, ErrTruncated) {
+	// A map32 header declaring 2^31-1 entries with none following is
+	// truncated; one declaring 2^32-1 is over the count limit.
+	if _, err := decodeHex(t, "df7fffffff").ReadMapHeader(); !errors.Is(err, ErrTruncated) {
 		t.Fatalf("oversized map header error = %v, want ErrTruncated", err)
+	}
+	if _, err := decodeHex(t, "dfffffffff").ReadMapHeader(); err == nil {
+		t.Fatal("map count 2^32-1 accepted")
 	}
 	n, err := decodeHex(t, "c0").ReadMapHeader()
 	if err != nil || n != 0 {
@@ -357,4 +361,17 @@ func FuzzDecoder(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestMapHeaderCountFitsInt: a map count that does not fit an int32 is
+// refused on every platform; on 32-bit platforms it used to wrap negative
+// in stream mode and decode as an empty map.
+func TestMapHeaderCountFitsInt(t *testing.T) {
+	in := []byte{0xdf, 0x80, 0x00, 0x00, 0x00, 0xa5, 'N', 'o', 'd', 'e', 's', 0x05}
+	for _, d := range []*Decoder{NewDecoder(in), NewStreamDecoder(bufio.NewReader(bytes.NewReader(in)))} {
+		n, err := d.ReadMapHeader()
+		if err == nil {
+			t.Fatalf("map count 2^31 accepted as %d", n)
+		}
+	}
 }

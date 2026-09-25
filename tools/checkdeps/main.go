@@ -10,7 +10,8 @@
 //   - A tool that needs more lives in its own module under tools/; such a
 //     module may depend, transitively, only on golang.org/x/ and
 //     github.com/0xCarbon/ modules, without replacements.
-//   - No project-authored unsafe imports, assembly or object files.
+//   - No project-authored unsafe or cgo imports, assembly, object or
+//     cgo source files.
 //
 // Frozen evidence under project/evidence/ (nested modules that pin the
 // implementations being compared) is not maintained source and is skipped.
@@ -147,8 +148,10 @@ func walk(root string) (toolModules []string, err error) {
 			return nil
 		}
 		switch filepath.Ext(d.Name()) {
-		case ".s", ".syso":
+		case ".s", ".S", ".sx", ".syso":
 			return fmt.Errorf("%s: assembly or object files are prohibited", slash)
+		case ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".m", ".f", ".F", ".for", ".f90":
+			return fmt.Errorf("%s: cgo sources are prohibited", slash)
 		case ".go":
 			file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
 			if err != nil {
@@ -159,8 +162,11 @@ func walk(root string) (toolModules []string, err error) {
 				if err != nil {
 					return fmt.Errorf("%s: import path: %w", slash, err)
 				}
-				if name == "unsafe" {
+				switch name {
+				case "unsafe":
 					return fmt.Errorf("%s: project-authored unsafe import prohibited", slash)
+				case "C":
+					return fmt.Errorf("%s: cgo (import \"C\") prohibited", slash)
 				}
 			}
 		}

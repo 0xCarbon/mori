@@ -29,7 +29,8 @@ behavioral contract per release), then code comments.
 - No project-authored `unsafe`, assembly or object files.
 - `make ci` passes before every commit. It runs gofmt, `go fix -diff`
   (modernizers), vet, golangci-lint (`.golangci.yml`), build, cross builds,
-  the dependency audit, `go mod tidy -diff`, the suite and the race detector.
+  the dependency audit, `go mod tidy -diff`, the suite on amd64 and 386,
+  the race detector and a benchmark smoke. CI adds a fuzz smoke.
 
 ## Wire compatibility
 
@@ -63,7 +64,7 @@ behavioral contract per release), then code comments.
 
 | Path | Contents |
 | --- | --- |
-| `/` | package `mori`: files named by subject, one `_test.go` per file |
+| `/` | package `mori`: files named by subject, one `_test.go` per file, plus shared test infrastructure named by subject (`helpers_test.go`, `simnet_test.go`, `fuzz_test.go`) |
 | `internal/` | packages with a named seam (see project/goal.md decisions) |
 | `tools/` | development tools (`checkdeps`, `benchcmp`) |
 | `project/` | plan, decisions, evidence; never at the root |

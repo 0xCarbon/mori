@@ -17,12 +17,16 @@
 //     and the smallest of int8/int16/int32/int64 below that.
 //   - maps use fixmap (< 16 entries), map16, map32.
 //
-// Decoding accepts every encoding of a value that go-msgpack accepts for
-// the target type: any integer format within range, str and bin families
-// for strings and bytes, 0/1 fixints for booleans, and nil for the zero
-// value. It never panics and never allocates more than the input holds:
-// in slice mode lengths are checked against the remaining input, and in
-// stream mode buffers grow with the bytes actually received.
+// Decoding accepts every encoding a MessagePack encoder can produce for the
+// target type: any integer format whose value is in range, str and bin
+// families for strings and bytes, 0/1 fixints for booleans, and nil for
+// the zero value. It is deliberately stricter than go-msgpack's decoder,
+// which also accepts arrays of integers as bytes or strings and wraps
+// out-of-range integers; no memberlist encoder produces either. Map counts
+// above 2^31-1 and skipped values nested deeper than 32 levels are refused.
+// It never panics and never allocates more than the input holds: in slice
+// mode lengths are checked against the remaining input, and in stream mode
+// buffers grow with the bytes actually received.
 package msgpack
 
 import (
@@ -340,6 +344,11 @@ func (d *Decoder) ReadMapHeader() (int, error) {
 	}
 	if err != nil {
 		return 0, err
+	}
+	// No real map has 2^31 entries (each holds at least two bytes), and the
+	// count must fit an int on 32-bit platforms.
+	if n > math.MaxInt32 {
+		return 0, fmt.Errorf("msgpack: map count %d exceeds the limit", n)
 	}
 	// Every entry holds at least two bytes.
 	if r := d.Remaining(); r >= 0 && n > uint64(r)/2 {

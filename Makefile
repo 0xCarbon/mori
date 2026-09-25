@@ -20,10 +20,10 @@ GO_FILES = $(shell find . -name '*.go' -not -path './.git/*' -not -path './proje
 # Cross targets are compiled and vetted; tests execute on the host only.
 CROSS_TARGETS := linux/386 linux/arm64 darwin/arm64 windows/amd64 freebsd/amd64
 
-.PHONY: bench-smoke ci check fmt fmt-check fix modernize-check vet lint build cross check-deps test race integ subnet cov bench fuzz-smoke modernize tidy-check help
+.PHONY: bench-smoke test-386 ci check fmt fmt-check fix modernize-check vet lint build cross check-deps test race integ subnet cov bench fuzz-smoke modernize tidy-check help
 
 help:
-	@echo "make ci           all gates: fmt, modernize, vet, lint, build, cross, deps, tidy, test, race, bench-smoke"
+	@echo "make ci           all gates: fmt, modernize, vet, lint, build, cross, deps, tidy, test, 386 test, race, bench-smoke"
 	@echo "make check        fast static gates (no tests)"
 	@echo "make test         full suite, CGO_ENABLED=0"
 	@echo "make race         full suite under the race detector (cgo exception)"
@@ -32,7 +32,7 @@ help:
 	@echo "make modernize    optional: golang-modernization skill gate (go-modernize on PATH)"
 	@echo "make fix          apply go fix modernizations and gofmt"
 
-ci: check tidy-check test race bench-smoke
+ci: check tidy-check test test-386 race bench-smoke
 
 check: fmt-check modernize-check vet lint build cross check-deps
 
@@ -74,6 +74,11 @@ tidy-check:
 
 test:
 	$(GO) test -count=1 ./...
+
+# 32-bit execution: Go int is 32 bits there, which the wire decoder must
+# respect.
+test-386:
+	GOARCH=386 $(GO) test -count=1 ./...
 
 race:
 	CGO_ENABLED=1 $(GO) test -race -count=1 ./...

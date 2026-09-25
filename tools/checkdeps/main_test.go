@@ -112,6 +112,9 @@ func TestSourcePolicy(t *testing.T) {
 		{"tools/dist/k.go", "package dist\nimport \"unsafe\"\nvar _ = unsafe.Sizeof(0)\n", "tools/dist/k.go"},
 		{"add_amd64.s", "TEXT ·add(SB),4,$0\n", "assembly"},
 		{"blob.syso", "x", "assembly"},
+		{"add_arm64.S", "TEXT ·add(SB),4,$0\n", "assembly"},
+		{"helper.c", "int x;\n", "cgo sources"},
+		{"c.go", "package example\n// int x;\nimport \"C\"\nvar _ = C.x\n", "cgo"},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			root := writeTree(t, map[string]string{"go.mod": testModFile, "a.go": "package example\n", tc.file: tc.content})

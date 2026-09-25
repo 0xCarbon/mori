@@ -7,9 +7,12 @@
 // Every message encodes as a map keyed by field name, with the entries
 // sorted by name (bytewise), exactly as github.com/hashicorp/go-msgpack/v2
 // encodes the structs with a default MsgpackHandle; fields tagged omitempty
-// upstream are omitted when zero. Decoding accepts any encoding go-msgpack accepts for the field
-// types, ignores unknown fields, lets the last duplicate key win, and resets
-// the message first. Byte-slice and string fields are copies, never aliases
+// // upstream are omitted when zero. Decoding accepts every encoding of the
+// field values a MessagePack encoder can produce (see package msgpack; it
+// refuses structs encoded as arrays and out-of-range integers, which
+// go-msgpack's decoder would accept but no memberlist peer sends), ignores
+// unknown fields, lets the last duplicate key win, and resets the message
+// first. Byte-slice and string fields are copies, never aliases
 // of the input.
 //
 // Field names and types are part of the protocol: never rename or retype a

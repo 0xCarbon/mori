@@ -10,11 +10,27 @@ import (
 	"time"
 )
 
-// fuzzMember returns a live instance with no goroutines running: fuzz
-// inputs are processed synchronously and reach the full state machine.
+// fuzzMember returns a live instance whose listeners, handler and event
+// dispatcher are not running: fuzz inputs are processed synchronously and
+// reach the full state machine. Suspicion and ack timers still fire on
+// their own goroutines, and instances persist across inputs, so a crash may
+// depend on earlier inputs as well as the reported one.
 func fuzzMember(tb testing.TB, f func(*Config)) *Memberlist {
 	tb.Helper()
-	c := testConfig(tb)
+	m, err := newFuzzMember(f)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return m
+}
+
+// newFuzzMember builds a fuzz instance without a testing.TB, so fuzz
+// targets can rebuild one from inside the fuzz function.
+func newFuzzMember(f func(*Config)) (*Memberlist, error) {
+	c := DefaultLANConfig()
+	c.Name = "local"
+	c.BindAddr = "127.0.0.1"
+	c.BindPort = 7946
 	c.Transport = (&MockNetwork{}).NewTransport("local")
 	c.Logger = slog.New(slog.DiscardHandler)
 	if f != nil {
@@ -22,10 +38,17 @@ func fuzzMember(tb testing.TB, f func(*Config)) *Memberlist {
 	}
 	m, err := buildMemberlist(c)
 	if err != nil {
-		tb.Fatal(err)
+		return nil, err
 	}
-	if err := m.setAlive(nil); err != nil {
-		tb.Fatal(err)
+	return m, m.setAlive(nil)
+}
+
+// mustFuzzMember is newFuzzMember for use inside fuzz functions.
+func mustFuzzMember(t *testing.T, f func(*Config)) *Memberlist {
+	t.Helper()
+	m, err := newFuzzMember(f)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return m
 }
@@ -90,14 +113,11 @@ func TestFuzzInstanceReachesStateMachine(t *testing.T) {
 // machine — which must never panic.
 func FuzzIngestPacket(f *testing.F) {
 	key := []byte("0123456789abcdef")
-	newPlain := func() *Memberlist { return fuzzMember(f, nil) }
-	newSecure := func() *Memberlist {
-		return fuzzMember(f, func(c *Config) {
-			c.SecretKey = key
-			c.Label = "fuzz"
-		})
+	secureConfig := func(c *Config) {
+		c.SecretKey = key
+		c.Label = "fuzz"
 	}
-	plain, secure := newPlain(), newSecure()
+	plain, secure := fuzzMember(f, nil), fuzzMember(f, secureConfig)
 	for _, p := range seedPackets(plain) {
 		f.Add(p, false)
 		sealed, err := sealPayload(1, secure.config.Keyring.primaryAEAD(), p, []byte("fuzz"), nil)
@@ -110,10 +130,10 @@ func FuzzIngestPacket(f *testing.F) {
 		// Random node names accumulate; start over before the table
 		// grows large enough to slow every input down.
 		if plain.NumMembers() > maxFuzzNodes {
-			plain = newPlain()
+			plain = mustFuzzMember(t, nil)
 		}
 		if secure.NumMembers() > maxFuzzNodes {
-			secure = newSecure()
+			secure = mustFuzzMember(t, secureConfig)
 		}
 		if encrypted {
 			ingestSync(secure, packet)
@@ -124,22 +144,48 @@ func FuzzIngestPacket(f *testing.F) {
 }
 
 // FuzzReadStream feeds arbitrary stream contents through the stream path:
-// readStream (decryption, decompression, limits), then the push/pull state
-// or user message decoder and the merge, which must never panic.
+// readStream (label-authenticated decryption for encrypted inputs,
+// decompression, limits), then the push/pull state or user message decoder
+// and the merge, which must never panic.
 func FuzzReadStream(f *testing.F) {
-	m := fuzzMember(f, func(c *Config) { c.Merge = acceptMerge{} })
-	state := pushPullHeader{Nodes: 1, UserStateLen: 3}.AppendMsgpack([]byte{byte(pushPullMsg)})
-	state = pushNodeState{Name: "peer", Addr: []byte{10, 0, 0, 2}, Port: 7946, Vsn: []uint8{1, 5, 2, 0, 0, 0}}.AppendMsgpack(state)
-	state = append(state, "usr"...)
-	f.Add(state)
-	user := userMsgHeader{UserMsgLen: 2}.AppendMsgpack([]byte{byte(userMsg)})
-	f.Add(append(user, "hi"...))
-	if c, err := compressPayload(state); err == nil {
-		f.Add(c)
+	key := []byte("0123456789abcdef")
+	plainConfig := func(c *Config) { c.Merge = acceptMerge{} }
+	secureConfig := func(c *Config) {
+		c.Merge = acceptMerge{}
+		c.SecretKey = key
+		c.Label = "fuzz"
 	}
-	f.Fuzz(func(t *testing.T, stream []byte) {
-		if m.NumMembers() > maxFuzzNodes {
-			m = fuzzMember(f, func(c *Config) { c.Merge = acceptMerge{} })
+	plain, secure := fuzzMember(f, plainConfig), fuzzMember(f, secureConfig)
+
+	// A joining push/pull with a live node (incarnation 1, so the merge
+	// and the merge delegate run) and user state, and a user message.
+	state := pushPullHeader{Nodes: 1, UserStateLen: 3, Join: true}.AppendMsgpack([]byte{byte(pushPullMsg)})
+	state = pushNodeState{Name: "peer", Addr: []byte{10, 0, 0, 2}, Port: 7946, Incarnation: 1, Vsn: []uint8{1, 5, 2, 0, 0, 0}}.AppendMsgpack(state)
+	state = append(state, "usr"...)
+	user := append(userMsgHeader{UserMsgLen: 2}.AppendMsgpack([]byte{byte(userMsg)}), "hi"...)
+	seeds := [][]byte{state, user}
+	if c, err := compressPayload(state); err == nil {
+		seeds = append(seeds, c)
+	}
+	for _, s := range seeds {
+		f.Add(s, false)
+		sealed, err := secure.encryptLocalState(s, "fuzz")
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(sealed, true)
+	}
+
+	f.Fuzz(func(t *testing.T, stream []byte, encrypted bool) {
+		if plain.NumMembers() > maxFuzzNodes {
+			plain = mustFuzzMember(t, plainConfig)
+		}
+		if secure.NumMembers() > maxFuzzNodes {
+			secure = mustFuzzMember(t, secureConfig)
+		}
+		m, label := plain, ""
+		if encrypted {
+			m, label = secure, "fuzz"
 		}
 		r, w := net.Pipe()
 		go func() {
@@ -147,7 +193,7 @@ func FuzzReadStream(f *testing.F) {
 			_ = w.Close()
 		}()
 		defer func() { _ = r.Close() }()
-		msgType, dec, err := m.readStream(r, "")
+		msgType, dec, err := m.readStream(r, label)
 		if err != nil {
 			return
 		}
@@ -161,4 +207,32 @@ func FuzzReadStream(f *testing.F) {
 			_ = m.readUserMsg(dec)
 		}
 	})
+}
+
+// TestFuzzStreamSeedsReachMerge: the stream seeds, plain and encrypted,
+// decode and merge their node (not only the rejection paths).
+func TestFuzzStreamSeedsReachMerge(t *testing.T) {
+	for _, encrypted := range []bool{false, true} {
+		m := fuzzMember(t, func(c *Config) {
+			if encrypted {
+				c.SecretKey = []byte("0123456789abcdef")
+				c.Label = "fuzz"
+			}
+		})
+		state := pushPullHeader{Nodes: 1, Join: true}.AppendMsgpack([]byte{byte(pushPullMsg)})
+		state = pushNodeState{Name: "peer", Addr: []byte{10, 0, 0, 2}, Port: 7946, Incarnation: 1, Vsn: []uint8{1, 5, 2, 0, 0, 0}}.AppendMsgpack(state)
+		label := ""
+		if encrypted {
+			sealed, err := m.encryptLocalState(state, "fuzz")
+			noErr(t, err)
+			state, label = sealed, "fuzz"
+		}
+		msgType, dec, err := m.readStream(streamFrom(t, state), label)
+		noErr(t, err)
+		equal(t, pushPullMsg, msgType)
+		join, nodes, user, err := m.readRemoteState(dec)
+		noErr(t, err)
+		noErr(t, m.mergeRemoteState(join, nodes, user))
+		equal(t, StateAlive, m.getNodeState("peer"), "encrypted=%v", encrypted)
+	}
 }

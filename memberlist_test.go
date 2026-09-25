@@ -1874,15 +1874,6 @@ func waitUntilSizeAndEstimate(t *testing.T, m *Memberlist, expected int) {
 	})
 }
 
-// This test should follow the recommended upgrade guide:
-// https://www.consul.io/docs/agent/encryption.html#configuring-gossip-encryption-on-an-existing-cluster
-//
-// We will use two nodes for this: m0 and m1
-//
-// 0. Start with nodes without encryption.
-// 1. Set an encryption key and set GossipVerifyIncoming=false and GossipVerifyOutgoing=false to all nodes.
-// 2. Change GossipVerifyOutgoing=true to all nodes.
-// 3. Change GossipVerifyIncoming=true to all nodes.
 // TestMemberlist_EncryptedGossipTransition walks a two-node cluster
 // through the three-stage upshift to encrypted gossip (verify incoming and
 // outgoing off, then outgoing on, then both on), restarting each node at

@@ -20,13 +20,8 @@ import (
 
 // fataler is satisfied by *testing.T, *testing.B and the retry package's R.
 type fataler interface {
+	Helper()
 	Fatalf(format string, args ...any)
-}
-
-func helper(t fataler) {
-	if h, ok := t.(interface{ Helper() }); ok {
-		h.Helper()
-	}
 }
 
 func describe(msgAndArgs []any) string {
@@ -40,73 +35,77 @@ func describe(msgAndArgs []any) string {
 }
 
 func noErr(t fataler, err error, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	if err != nil {
 		t.Fatalf("%sunexpected error: %v", describe(msgAndArgs), err)
 	}
 }
 
 func isErr(t fataler, err error, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	if err == nil {
 		t.Fatalf("%sexpected an error, got nil", describe(msgAndArgs))
 	}
 }
 
 func errIs(t fataler, err, target error, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	if !errors.Is(err, target) {
 		t.Fatalf("%serror %v does not match %v", describe(msgAndArgs), err, target)
 	}
 }
 
-// equalValues compares like reflect.DeepEqual, except that byte slices are
-// equal when their contents are (nil equals empty).
+// equalValues compares like testify's ObjectsAreEqual: byte slices by
+// content (but nil only equals nil), everything else with
+// reflect.DeepEqual.
 func equalValues(want, got any) bool {
 	if wb, ok := want.([]byte); ok {
 		gb, ok := got.([]byte)
-		return ok && bytes.Equal(wb, gb)
+		if !ok || (wb == nil) != (gb == nil) {
+			return false
+		}
+		return bytes.Equal(wb, gb)
 	}
 	return reflect.DeepEqual(want, got)
 }
 
 func equal(t fataler, want, got any, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	if !equalValues(want, got) {
 		t.Fatalf("%snot equal:\nwant: %#v\n got: %#v", describe(msgAndArgs), want, got)
 	}
 }
 
 func isTrue(t fataler, cond bool, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	if !cond {
 		t.Fatalf("%sexpected true", describe(msgAndArgs))
 	}
 }
 
 func isFalse(t fataler, cond bool, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	if cond {
 		t.Fatalf("%sexpected false", describe(msgAndArgs))
 	}
 }
 
 func contains(t fataler, s, substr string) {
-	helper(t)
+	t.Helper()
 	if !strings.Contains(s, substr) {
 		t.Fatalf("%q does not contain %q", s, substr)
 	}
 }
 
 func isZero(t fataler, v any, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	if v != nil && !reflect.ValueOf(v).IsZero() {
 		t.Fatalf("%sexpected the zero value, got %#v", describe(msgAndArgs), v)
 	}
 }
 
 func isNil(t fataler, v any) {
-	helper(t)
+	t.Helper()
 	if v == nil {
 		return
 	}
@@ -120,42 +119,42 @@ func isNil(t fataler, v any) {
 }
 
 func hasLen(t fataler, v any, n int, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	if l := reflect.ValueOf(v).Len(); l != n {
 		t.Fatalf("%slength %d, want %d: %#v", describe(msgAndArgs), l, n, v)
 	}
 }
 
 func notEmpty(t fataler, v any, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	if reflect.ValueOf(v).Len() == 0 {
 		t.Fatalf("%sexpected a non-empty value", describe(msgAndArgs))
 	}
 }
 
 func less[T cmp.Ordered](t fataler, a, b T, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	if a >= b {
 		t.Fatalf("%s%v is not less than %v", describe(msgAndArgs), a, b)
 	}
 }
 
 func lessOrEqual[T cmp.Ordered](t fataler, a, b T, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	if a > b {
 		t.Fatalf("%s%v is greater than %v", describe(msgAndArgs), a, b)
 	}
 }
 
 func greaterOrEqual[T cmp.Ordered](t fataler, a, b T, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	if a < b {
 		t.Fatalf("%s%v is less than %v", describe(msgAndArgs), a, b)
 	}
 }
 
 func positive[T cmp.Ordered](t fataler, a T, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	var zero T
 	if a <= zero {
 		t.Fatalf("%s%v is not positive", describe(msgAndArgs), a)
@@ -165,7 +164,7 @@ func positive[T cmp.Ordered](t fataler, a T, msgAndArgs ...any) {
 // elementsMatch reports whether two slices hold the same elements with the
 // same multiplicity, in any order.
 func elementsMatch[T any](t fataler, want, got []T, msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	ok := len(want) == len(got)
 	used := make([]bool, len(got))
 	for _, w := range want {
@@ -187,7 +186,7 @@ func elementsMatch[T any](t fataler, want, got []T, msgAndArgs ...any) {
 }
 
 func panics(t fataler, f func(), msgAndArgs ...any) {
-	helper(t)
+	t.Helper()
 	defer func() {
 		if recover() == nil {
 			t.Fatalf("%sexpected a panic", describe(msgAndArgs))

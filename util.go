@@ -266,20 +266,37 @@ func decodeCompoundMessage(buf []byte) (trunc int, parts [][]byte, err error) {
 const maxIncompressiblePacket = 22
 
 // LZW coders are pooled: each allocates tables of tens of kilobytes, which
-// used to dominate the cost of sending a compressed packet.
+// used to dominate the cost of sending a compressed packet. Before a coder
+// returns to the pool it is pointed at an empty source or sink, so an idle
+// coder never keeps a message buffer alive.
 var (
-	lzwWriters = sync.Pool{New: func() any { return lzw.NewWriter(nil, lzw.LSB, lzwLitWidth) }}
-	lzwReaders = sync.Pool{New: func() any { return lzw.NewReader(nil, lzw.LSB, lzwLitWidth) }}
+	lzwWriters = sync.Pool{New: func() any { return lzw.NewWriter(lzwIdleSink, lzw.LSB, lzwLitWidth) }}
+	lzwReaders = sync.Pool{New: func() any { return lzw.NewReader(lzwIdleSource, lzw.LSB, lzwLitWidth) }}
+
+	// Idle coders point here. Shared safely: a coder only touches its
+	// source or sink between Get and Put, after another Reset.
+	lzwIdleSink   = &lzwBuffer{}
+	lzwIdleSource = bytes.NewReader(nil)
 )
+
+// lzwBuffer is a bytes.Buffer with the Flush method lzw.Writer looks for;
+// without it the writer wraps its destination in a new 4 KiB bufio.Writer
+// on every Reset.
+type lzwBuffer struct{ bytes.Buffer }
+
+func (*lzwBuffer) Flush() error { return nil }
 
 // compressPayload takes an opaque input buffer, compresses it
 // and wraps it in a compress{} message that is encoded.
 func compressPayload(inp []byte) ([]byte, error) {
-	var buf bytes.Buffer
+	var buf lzwBuffer
 	buf.Grow(len(inp)/2 + 16)
 	w := lzwWriters.Get().(*lzw.Writer)
 	w.Reset(&buf, lzw.LSB, lzwLitWidth)
-	defer lzwWriters.Put(w)
+	defer func() {
+		w.Reset(lzwIdleSink, lzw.LSB, lzwLitWidth)
+		lzwWriters.Put(w)
+	}()
 
 	if _, err := w.Write(inp); err != nil {
 		return nil, err
@@ -321,23 +338,34 @@ func decompressBuffer(c *compress, limit int) ([]byte, error) {
 	r.Reset(bytes.NewReader(c.Buf), lzw.LSB, lzwLitWidth)
 	defer func() {
 		_ = r.Close()
+		r.Reset(lzwIdleSource, lzw.LSB, lzwLitWidth)
 		lzwReaders.Put(r)
 	}()
 
-	// Read at most one byte past the limit, so an oversized payload is
-	// detected without being materialized.
-	var b bytes.Buffer
-	b.Grow(min(4*len(c.Buf), limit+1))
-	n, err := io.CopyN(&b, r, int64(limit)+1)
-	if err != nil && err != io.EOF {
-		return nil, err
+	// Read into a buffer sized from the input and grown as needed, never
+	// past one byte beyond the limit, so an oversized payload is detected
+	// without being materialized.
+	out := make([]byte, 0, min(4*len(c.Buf)+64, limit+1))
+	for {
+		if len(out) == cap(out) {
+			if len(out) > limit {
+				return nil, fmt.Errorf("decompressed message is larger than limit (%d)", limit)
+			}
+			out = slices.Grow(out, min(cap(out), limit+1-len(out)))
+		}
+		n, err := r.Read(out[len(out):cap(out)])
+		out = out[:len(out)+n]
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
-	if n > int64(limit) {
+	if len(out) > limit {
 		return nil, fmt.Errorf("decompressed message is larger than limit (%d)", limit)
 	}
-
-	// Return the uncompressed bytes
-	return b.Bytes(), nil
+	return out, nil
 }
 
 // joinHostPort returns the host:port form of an address, for use with a

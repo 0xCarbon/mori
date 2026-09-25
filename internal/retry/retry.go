@@ -38,6 +38,10 @@ type R struct {
 	output []string
 }
 
+// Helper is a no-op, so R satisfies assertion helpers that mark themselves
+// with testing.TB's Helper.
+func (r *R) Helper() {}
+
 func (r *R) FailNow() {
 	r.fail = true
 	runtime.Goexit()

@@ -39,7 +39,7 @@ Beyond the fork point, Mori adds capabilities that are not in upstream
 memberlist (see the [CHANGELOG](CHANGELOG.md) for exact semantics):
 
 * **No dependencies.** The module requires nothing but the Go standard
-  library (Go 1.27+): no go-msgpack, go-metrics, go-sockaddr, miekg/dns,
+  library (Go 1.27.1): no go-msgpack, go-metrics, go-sockaddr, miekg/dns,
   btree or testify. It owns its MessagePack codec, byte-for-byte compatible
   with go-msgpack (proven by golden vectors, a randomized differential and
   mixed-version clusters against v0.7.0; see `project/evidence/`).
@@ -51,7 +51,7 @@ memberlist (see the [CHANGELOG](CHANGELOG.md) for exact semantics):
   `*slog.Logger`; `Config.Metrics` is a `MetricSink` interface owned by the
   instance (no global registry), with the metric list documented on it.
 * **Performance.** Handling an alive message is 6× faster with 5× fewer
-  allocations than v0.7.0; compressed and encrypted packets reuse pooled LZW coders
+  allocations than before this release; compressed and encrypted packets reuse pooled LZW coders
   and cached AES-GCM ciphers; the UDP listener no longer allocates 64 KiB per
   datagram (measurements in `project/evidence/w7-perf`).
 * **Configurable node-meta cap** — `Config.MetaMaxSize` sets the producer-side
@@ -92,7 +92,11 @@ v0.8 changes the API in a few places (full list under **BREAKING** in the
   event callbacks (it was always `StateAlive`).
 
 The wire protocol is unchanged: v0.7 and v0.8 nodes can run in one cluster
-during a rolling upgrade.
+during a rolling upgrade. Two new receive limits can refuse traffic a v0.7
+node accepted: stream user messages above 20 MiB (`SendReliable` now fails
+with `ErrMessageTooLarge` on the sender), and plaintext or decompressed
+push/pull states above 40 MiB — roughly 65,000 nodes with 512-byte meta;
+encrypted push/pull was already capped at 20 MiB upstream.
 
 ## Migrating from hashicorp/memberlist
 

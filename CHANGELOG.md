@@ -78,6 +78,10 @@ consumers on older toolchains must raise their `go` directive to adopt it.
   	metrics.MeasureSinceWithLabels(k, t, labels(l))
   }
   ```
+* **BREAKING:** `SendReliable` returns the new sentinel `ErrMessageTooLarge`
+  for messages above 20 MiB, which receivers refuse, instead of reporting
+  success for a message that is never delivered. A node whose own push/pull
+  state exceeds the 40 MiB stream limit reports that error when sending it.
 * **BREAKING:** `Config.MsgpackUseNewTimeFormat` is removed. No protocol
   message carries a time value, so it never changed the encoding.
 * The TCP-first DNS lookup in `Join` queries A and AAAA records through
@@ -110,6 +114,9 @@ consumers on older toolchains must raise their `go` directive to adopt it.
   message. It used to decode bytes 1–4 of the MessagePack encoding as a
   big-endian length (111 bytes sent were reported as 2,208,582,100).
   Inherited from upstream.
+* A data race between sending a packet and applying an alive message:
+  `rawSendMsgPacket` read the destination's protocol version after
+  releasing the node lock. Inherited from upstream.
 * An alive message carrying a node's IPv4 address in 16-byte form (as
   advertised by nodes bound to `0.0.0.0`) no longer counts as an address
   change against the 4-byte form, which reported a spurious conflict and
@@ -128,8 +135,8 @@ consumers on older toolchains must raise their `go` directive to adopt it.
   input bound Mori enforces. Fuzz targets cover the whole packet path
   (plaintext and encrypted, through the live state machine), the stream
   path including push/pull merge, the message decoders and the MessagePack
-  decoder; `make fuzz-smoke` runs them in CI. Tens of millions of executions
-  found no failure after the fixes below.
+  decoder; `make fuzz-smoke` runs them in CI. The receipt in
+  `project/evidence/w8-review/fuzz.txt` records the executions run.
 
 Ports the four upstream hashicorp/memberlist fixes released after the fork
 point, and closes further instances of the same classes found while
@@ -160,6 +167,11 @@ panic) before the fix.
   message nested in a compound message, is refused. Senders never produce
   either; accepting them multiplied decompression work and recursion depth
   per packet.
+* Push/pull node states must carry a node name; a nameless state fails the
+  exchange. Before, each 1-byte nil in a push/pull stream decoded to a full
+  node state (over 100 bytes of memory per input byte).
+* The MessagePack decoder refuses map counts above 2^31-1; on 32-bit
+  platforms such a count wrapped negative and decoded as an empty map.
 * Version-0 (PKCS7-padded) encrypted payloads with an invalid pad length
   return an error instead of a slice-bounds panic (requires a key holder).
 

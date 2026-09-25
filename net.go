@@ -87,7 +87,7 @@ const (
 	userMsgOverhead        = 1
 	blockingWarning        = 10 * time.Millisecond // Warn if a UDP packet takes this long to process
 	maxPushStateBytes      = 20 * 1024 * 1024
-	maxPushStateNodes      = 1024 * 1024      // Each requires conservatively  ~20 bytes when encoded
+	maxPushStateNodes      = 1024 * 1024      // Each is at least 8 bytes encoded (a map with a non-empty Name)
 	maxUserMsgBytes        = 20 * 1024 * 1024 // Largest stream user message buffered off the wire
 	maxPushPullRequests    = 128              // Maximum number of concurrent push/pull requests
 	pushStatePrealloc      = 1024             // Node states preallocated before any is decoded
@@ -773,9 +773,10 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 			return err
 		}
 		m.nodeLock.RLock()
-		nodeState, ok := m.nodeMap[toAddr]
-		if ok {
-			node = &nodeState.Node
+		if nodeState, ok := m.nodeMap[toAddr]; ok {
+			// Copy under the lock: alive handling updates versions in place.
+			snapshot := nodeState.Node
+			node = &snapshot
 		}
 		m.nodeLock.RUnlock()
 	}
@@ -845,6 +846,11 @@ func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel
 func (m *Memberlist) sendUserMsg(a Address, sendBuf []byte) error {
 	if a.Name == "" && m.config.RequireNodeNames {
 		return errNodeNamesAreRequired
+	}
+	// Receivers refuse larger stream user messages; fail here rather than
+	// report success for a message that is never delivered.
+	if len(sendBuf) > maxUserMsgBytes {
+		return fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(sendBuf), maxUserMsgBytes)
 	}
 
 	conn, err := m.transport.DialAddressTimeout(a, m.config.TCPTimeout)
@@ -960,6 +966,11 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 	out = append(out, userData...)
 
 	m.metrics.gauge(keySizeLocal, float32(len(out)))
+	// Peers refuse plaintext stream messages above maxStreamMessageBytes;
+	// report the cause here instead of an opaque failure there.
+	if len(out) > maxStreamMessageBytes {
+		return fmt.Errorf("local push/pull state is %d bytes, above the %d-byte stream limit", len(out), maxStreamMessageBytes)
+	}
 	return m.rawSendMsgStream(conn, out, streamLabel)
 }
 
@@ -1111,13 +1122,20 @@ func (m *Memberlist) readRemoteState(dec *msgpack.Decoder) (bool, []pushNodeStat
 	// Decode the states. Storage grows with the states actually received,
 	// never from the declared count: a short header must not buy a large
 	// allocation.
+	// Every state must name its node: a nameless state is meaningless, and
+	// requiring a name keeps each state at least 8 encoded bytes, bounding
+	// memory per input byte (a bare nil would otherwise decode to a full
+	// state).
 	remoteNodes := make([]pushNodeState, 0, min(header.Nodes, pushStatePrealloc))
-	for range header.Nodes {
-		var n pushNodeState
+	for i := range header.Nodes {
+		remoteNodes = append(remoteNodes, pushNodeState{})
+		n := &remoteNodes[len(remoteNodes)-1]
 		if err := n.DecodeMsgpack(dec); err != nil {
 			return false, nil, nil, err
 		}
-		remoteNodes = append(remoteNodes, n)
+		if n.Name == "" {
+			return false, nil, nil, fmt.Errorf("node state %d has no name", i)
+		}
 	}
 
 	// Read the remote user state into a buffer
