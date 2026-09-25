@@ -1678,13 +1678,14 @@ func TestPushPullOversizeRemoteStateReportsCause(t *testing.T) {
 
 // TestCompressedStreamBudgetCoversLZWWorstCase pins
 // maxCompressedStreamBytes to the largest compressed/lzw output of a
-// maxDecompressedBytes payload: at most one 12-bit code per input byte,
-// one clear code per 3,839 codes (4096 - 257 literal+control codes before
-// the table fills), the end code, and the compress.Buf framing (type byte,
-// map with Algo and Buf entries, 5-byte raw header).
+// maxDecompressedBytes payload: at most one 12-bit code per input byte, an
+// initial clear code, one clear code per 3,838 data codes (compress/lzw
+// clears when the next code reaches 4095, starting from 257), the end
+// code, and the compress.Buf framing (type byte, map with Algo and Buf
+// entries, 5-byte raw header).
 func TestCompressedStreamBudgetCoversLZWWorstCase(t *testing.T) {
 	const n = maxDecompressedBytes
-	codes := n + n/3839 + 2 // data, clear codes, end code
+	codes := n + n/3838 + 2 // data, clear codes, end code
 	lzw := (codes*12 + 7) / 8
 	framing := len(compress{Algo: uint8(lzwAlgo), Buf: make([]byte, 1<<17)}.AppendMsgpack([]byte{byte(compressMsg)})) - 1<<17
 	if need := framing + lzw; maxCompressedStreamBytes < need {

@@ -109,9 +109,9 @@ const (
 	// maxCompressedStreamBytes bounds a compressed stream message as read
 	// from the connection. Upstream memberlist and Mori v0.8.0 senders
 	// compress stream messages whether or not that shrinks them, and LZW
-	// expands incompressible input: each code is
-	// at most 12 bits and covers at least one byte (1.5x), plus a clear code
-	// per 3,839 codes and the end code. A message within
+	// expands incompressible input: each code is at most 12 bits and covers
+	// at least one byte (1.5x), plus an initial clear code, a clear code per
+	// 3,838 data codes and the end code. A message within
 	// maxDecompressedBytes must fit.
 	maxCompressedStreamBytes = maxDecompressedBytes*3/2 + maxDecompressedBytes/1024 + 64<<10
 )

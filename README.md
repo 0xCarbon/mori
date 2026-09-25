@@ -97,7 +97,9 @@ during a rolling upgrade. Two new receive limits can refuse traffic a v0.7
 node accepted: stream user messages above 20 MiB (`SendReliable` now fails
 with `ErrMessageTooLarge` on the sender), and plaintext or decompressed
 push/pull states above 40 MiB — roughly 65,000 nodes with 512-byte meta;
-encrypted push/pull was already capped at 20 MiB upstream.
+encrypted push/pull was already capped at 20 MiB upstream. A Mori node
+also refuses to send push/pull user state above 20 MiB, which Mori
+receivers refuse but upstream memberlist receivers accept.
 
 ## Migrating from hashicorp/memberlist
 
