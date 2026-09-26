@@ -2354,6 +2354,42 @@ func TestVerifyProtocol(t *testing.T) {
 	}
 }
 
+// Retained dead/left records may speak an older protocol after a rolling
+// upgrade. They must not prevent compatible live peers from synchronizing.
+func TestVerifyProtocolRetiredNodes(t *testing.T) {
+	for _, protocol := range []string{"core", "delegate"} {
+		for _, side := range []string{"local", "remote"} {
+			for _, state := range []NodeStateType{StateAlive, StateSuspect, StateDead, StateLeft} {
+				t.Run(protocol+"/"+side+"/"+state.metricsString(), func(t *testing.T) {
+					current := [6]uint8{2, 5, 2, 2, 5, 2}
+					old := current
+					if protocol == "core" {
+						old[0], old[1], old[2] = 1, 1, 1
+					} else {
+						old[3], old[4], old[5] = 1, 1, 1
+					}
+					live := &nodeState{Name: "live", State: StateAlive}
+					live.setVersions(current)
+					m := &Memberlist{nodes: []*nodeState{live}}
+					remote := []pushNodeState{{Name: "peer", State: int(StateAlive), Vsn: current[:]}}
+					if side == "local" {
+						retired := &nodeState{Name: "old", State: state}
+						retired.setVersions(old)
+						m.nodes = append(m.nodes, retired)
+					} else {
+						remote = append(remote, pushNodeState{Name: "old", State: int(state), Vsn: old[:]})
+					}
+					err := m.verifyProtocol(remote)
+					wantCompatible := state == StateDead || state == StateLeft
+					if (err == nil) != wantCompatible {
+						t.Fatalf("verifyProtocol = %v, want compatible=%v", err, wantCompatible)
+					}
+				})
+			}
+		}
+	}
+}
+
 func testVerifyProtocolSingle(t *testing.T, A [][6]uint8, B [][6]uint8, expect bool) {
 	m := GetMemberlist(t, nil)
 	defer func() {
@@ -2436,7 +2472,7 @@ func TestMalformedVsnFromWire(t *testing.T) {
 			}
 		})
 
-		for _, state := range []NodeStateType{StateAlive, StateSuspect} {
+		for _, state := range []NodeStateType{StateAlive, StateSuspect, StateDead, StateLeft} {
 			t.Run(fmt.Sprintf("push-pull/%s/len%d", state.metricsString(), n), func(t *testing.T) {
 				m := newM(t)
 				remote := []pushNodeState{{Name: "peer", Addr: []byte{127, 0, 0, 2}, Port: 7946, State: int(state), Vsn: vsn}}

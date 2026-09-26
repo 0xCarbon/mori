@@ -1,5 +1,12 @@
 ## Unreleased
 
+### Fixed
+
+* Retained dead or left node records no longer reject push/pull exchanges
+  because they spoke an older core or delegate protocol. Alive and suspect
+  nodes still undergo compatibility checks, and malformed version vectors
+  are refused regardless of node state.
+
 ## v0.8.1 (Mori)
 
 A bug-fix release for v0.8.0: unencrypted push/pull states of about 28 to
