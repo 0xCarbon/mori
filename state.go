@@ -727,8 +727,9 @@ func (m *Memberlist) pushPullNode(a Address, join bool) error {
 // for the entire cluster.
 //
 // After this, it goes through the entire cluster (local and remote) and
-// verifies that everyone's speaking protocol versions satisfy this range.
-// If this passes, it means that every node can understand each other.
+// verifies that alive and suspect nodes' speaking versions satisfy this range.
+// Dead and left records cannot constrain a cluster after a protocol upgrade;
+// their wire version vectors are still validated before they are ignored.
 func (m *Memberlist) verifyProtocol(remote []pushNodeState) error {
 	m.nodeLock.RLock()
 	defer m.nodeLock.RUnlock()
@@ -788,9 +789,13 @@ func (m *Memberlist) verifyProtocol(remote []pushNodeState) error {
 	}
 
 	// Now that we definitively know the minimum and maximum understood
-	// version that satisfies the whole cluster, we verify that every
-	// node in the cluster satisifies this.
+	// version that satisfies the whole cluster, verify the speaking versions
+	// of nodes that may still participate. Retained dead/left records must
+	// not block synchronization after the remaining nodes upgrade.
 	for _, n := range remote {
+		if NodeStateType(n.State) == StateDead || NodeStateType(n.State) == StateLeft {
+			continue
+		}
 		// Validated by the first loop; an empty vector reads as zeros.
 		vsn, _ := parseVsn(n.Vsn)
 		nPCur, nDCur := vsn[2], vsn[5]
@@ -809,6 +814,9 @@ func (m *Memberlist) verifyProtocol(remote []pushNodeState) error {
 	}
 
 	for _, n := range m.nodes {
+		if n.DeadOrLeft() {
+			continue
+		}
 		nPCur := n.PCur
 		nDCur := n.DCur
 

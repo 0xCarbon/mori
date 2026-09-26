@@ -1,5 +1,24 @@
 ## Unreleased
 
+## v0.8.2 (Mori)
+
+A bug-fix release for v0.8.1: retained dead or left nodes no longer block
+push/pull synchronization after a protocol upgrade. The Go API and wire
+encoding are unchanged.
+
+### Fixed
+
+* Retained dead or left node records no longer reject push/pull exchanges
+  because they spoke an older core or delegate protocol. Alive and suspect
+  nodes still undergo compatibility checks, and malformed version vectors
+  are refused regardless of node state.
+
+### Maintenance
+
+* Record upstream memberlist ancestry through `9378459e` (pull request #25).
+  The upstream changes were already incorporated or superseded by Mori;
+  the ancestry merge preserves Mori's implementations and dependencies.
+
 ## v0.8.1 (Mori)
 
 A bug-fix release for v0.8.0: unencrypted push/pull states of about 28 to
